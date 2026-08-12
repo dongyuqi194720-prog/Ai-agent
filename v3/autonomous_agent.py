@@ -462,10 +462,15 @@ analyze_code
                             + "|1|100"
                     )
 
-                if "这是目录" not in result:
+            if tool == "read_file_chunk":
 
-                    self.state["read_done"] = True
-                    self.state["phase"] = "ANALYZE"
+                print(
+                      "源码读取完成，进入分析阶段"
+                )
+
+                self.state["read_done"] = True
+                self.state["phase"] = "ANALYZE"
+
 
             if tool == "analyze_code":
 
