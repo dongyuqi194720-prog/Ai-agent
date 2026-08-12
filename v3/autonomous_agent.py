@@ -379,6 +379,23 @@ analyze_code
                         + "|1|100"
                 )
 
+            # V4.3.4 force analyze phase
+
+            if (
+                self.state["phase"] == "ANALYZE"
+                and tool != "analyze_code"
+            ):
+
+                print(
+                      "分析阶段强制执行 analyze_code"
+                )
+
+                tool = "analyze_code"
+
+                args = (
+                self.state["target_file"]
+                )
+
             # V4.3.1 phase guard
 
             if (
