@@ -17,10 +17,21 @@ class AutonomousAgent:
         self.max_steps = 20
         self.state = {
             "phase": "SEARCH",
+
             "search_done": False,
+
             "target_file": None,
+
             "read_done": False,
+
+            "analysis_context": [], 
+
             "analyze_done": False,
+
+            "summary_done": False,
+
+            "can_modify": False,
+
             "tool_failures": 0
         }
          
@@ -181,7 +192,21 @@ class AutonomousAgent:
     ):
 
         return f"""
+当前状态规则:
 
+SEARCH阶段:
+只能搜索代码。
+
+READ阶段:
+只能读取文件。
+
+ANALYZE阶段:
+只能分析代码，不允许修改。
+
+SUMMARY阶段:
+输出分析结论和修改建议。
+
+没有完成完整分析前，禁止调用write_file。
 当前 Agent 执行状态:
 
 阶段:
@@ -406,6 +431,8 @@ analyze_code
 
                 self.state["analyze_done"] = True
                 self.state["phase"] = "SUMMARY"
+                self.state["summary_done"] = False
+                self.state["can_modify"] = False
 
             if tool == "search_code_index":
 
