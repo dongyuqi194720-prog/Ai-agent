@@ -360,6 +360,13 @@ analyze_code
             tool, args = self.extract_tool(
                 response
             )
+            # V4.3.1 phase guard
+
+            if (
+                self.state["phase"] == "READ"
+                and tool == "search_code_index"
+            ):
+                tool = "read_file_chunk"
 
 
             if not tool:
@@ -437,6 +444,10 @@ analyze_code
             if tool == "search_code_index":
 
                 self.state["search_done"] = True
+
+            if self.state["target_file"]:
+
+                self.state["phase"] = "READ"
 
                 try:
                     import json
