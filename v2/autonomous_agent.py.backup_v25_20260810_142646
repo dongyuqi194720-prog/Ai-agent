@@ -1,0 +1,996 @@
+
+import os
+
+import re
+
+import json
+
+import time
+
+from datetime import datetime
+
+class AutonomousAgent:
+
+    def __init__(self, llm, router, project=None):
+
+        self.llm = llm
+
+        self.router = router
+
+        self.project = project or os.path.expanduser("~/llama.cpp")
+
+        self.state_file = os.path.expanduser(
+
+            "~/.ai_programmer_v2_state.json"
+
+        )
+
+        self.max_steps = 40
+
+        self.step = 0
+
+        self.history = []
+
+    # -------------------------------------------------
+
+    # State
+
+    # -------------------------------------------------
+
+    def load_state(self):
+
+        try:
+
+            if os.path.exists(self.state_file):
+
+                with open(
+
+                    self.state_file,
+
+                    "r",
+
+                    encoding="utf-8"
+
+                ) as f:
+
+                    return json.load(f)
+
+        except Exception as e:
+
+            print("读取 V2 状态失败:", e)
+
+        return {}
+
+    def save_state(self, state):
+
+        try:
+
+            state["updated"] = datetime.now().strftime(
+
+                "%Y-%m-%d %H:%M:%S"
+
+            )
+
+            with open(
+
+                self.state_file,
+
+                "w",
+
+                encoding="utf-8"
+
+            ) as f:
+
+                json.dump(
+
+                    state,
+
+                    f,
+
+                    ensure_ascii=False,
+
+                    indent=2
+
+                )
+
+        except Exception as e:
+
+            print("保存 V2 状态失败:", e)
+
+    # -------------------------------------------------
+
+    # Safety
+
+    # -------------------------------------------------
+
+    def dangerous_command(self, command):
+
+        dangerous = [
+
+            r"\bsudo\b",
+
+            r"\brm\s+-rf\b",
+
+            r"\bmkfs\b",
+
+            r"\bdd\s+if=",
+
+            r"\bshutdown\b",
+
+            r"\breboot\b",
+
+            r"\bpoweroff\b",
+
+            r"\bmount\b",
+
+            r"\bumount\b",
+
+            r"\bchmod\s+777\b",
+
+            r"\bchown\b",
+
+            r">\s*/dev/",
+
+            r"\bapt(-get)?\s+(install|remove|purge)",
+
+            r"\bdnf\s+(install|remove)",
+
+            r"\byum\s+(install|remove)",
+
+            r"\bpacman\s+-S",
+
+        ]
+
+        for pattern in dangerous:
+
+            if re.search(
+
+                pattern,
+
+                command,
+
+                re.IGNORECASE
+
+            ):
+
+                return True
+
+        return False
+
+    # -------------------------------------------------
+
+    # Tool parsing
+
+    # -------------------------------------------------
+
+    def extract_tool(self, text):
+
+        pattern = re.compile(
+
+            r"<([A-Za-z_][A-Za-z0-9_]*)>(.*?)</\1>",
+
+            re.DOTALL
+
+        )
+
+        matches = pattern.findall(text)
+
+        if not matches:
+
+            return None, None
+
+        name, args = matches[0]
+
+        return name, args.strip()
+
+    def parse_args(self, tool_name, raw):
+
+        if tool_name in (
+
+            "read_file_chunk",
+
+        ):
+
+            parts = raw.split("|||")
+
+            if len(parts) != 3:
+
+                return None
+
+            return {
+
+                "path": parts[0].strip(),
+
+                "start": int(parts[1].strip()),
+
+                "end": int(parts[2].strip())
+
+            }
+
+        if tool_name == "write_file":
+
+            if "|||" not in raw:
+
+                return None
+
+            path, content = raw.split(
+
+                "|||",
+
+                1
+
+            )
+
+            return {
+
+                "path": path.strip(),
+
+                "content": content
+
+            }
+
+        if tool_name in (
+
+            "read_file",
+
+            "list_files",
+
+            "create_project_index",
+
+            "analyze_code",
+
+            "search_code_index",
+
+            "vscode_open",
+
+            "run_command",
+
+            "git_status",
+
+            "git_diff",
+
+            "git_log",
+
+            "build_project",
+
+            "test_project",
+
+            "web_search",
+
+            "web_fetch",
+
+        ):
+
+            return raw
+
+        return raw
+
+    # -------------------------------------------------
+
+    # Execute
+
+    # -------------------------------------------------
+
+    def execute_tool(self, name, raw):
+
+        args = self.parse_args(
+
+            name,
+
+            raw
+
+        )
+
+        if args is None:
+
+            return "工具参数格式错误，请重新选择工具"
+
+
+
+        if isinstance(args,str):
+
+            if not args.strip():
+
+                return (
+                    "工具参数为空。"
+                    "请提供正确参数。"
+                )
+
+        if name == "run_command":
+
+            command = args
+
+            if self.dangerous_command(command):
+
+                print()
+
+                print("================================")
+
+                print("检测到高风险命令")
+
+                print("================================")
+
+                print(command)
+
+                print()
+
+                answer = input(
+
+                    "是否允许执行？[y/N]: "
+
+                ).strip().lower()
+
+                if answer != "y":
+
+                    return "用户拒绝执行高风险命令"
+
+        try:
+
+
+            # V2.2 路径检查
+
+            if name in (
+                "read_file",
+                "read_file_chunk",
+                "analyze_code"
+            ):
+
+
+                import os
+
+
+                check_path = args
+
+
+                if isinstance(args, dict):
+
+                    check_path = args.get(
+                        "path",
+                        ""
+                    )
+
+
+                check_path = os.path.expanduser(
+                    check_path
+                )
+
+
+                if os.path.isdir(check_path):
+
+                    return (
+                        "错误: 提供的是目录，不是文件。\n"
+                        "请先使用 search_code_index "
+                        "找到真实源码文件。"
+                    )
+
+
+
+            result = self.router.call(
+
+                name,
+
+                args
+
+            )
+
+            if result is None:
+
+                result = ""
+
+            return str(result)
+
+        except Exception as e:
+
+            return (
+
+                "工具执行异常: "
+
+                + str(e)
+
+            )
+
+    # -------------------------------------------------
+
+    # Prompt
+
+    # -------------------------------------------------
+
+    def build_prompt(
+
+        self,
+
+        question,
+
+        observation
+
+    ):
+
+        history_text = ""
+
+        if self.history:
+
+            history_text = "\n\n".join(
+
+                self.history[-8:]
+
+            )
+
+        return f"""
+
+你是一个真正自主工作的本地 AI 程序员。
+
+你运行在 Linux 电脑上。
+
+本地模型：
+
+Qwen / llama.cpp
+
+当前项目：
+
+{self.project}
+
+用户任务：
+
+{question}
+
+你必须自己完成任务，而不是只告诉用户怎么做。
+
+你拥有工具：
+
+<search_code_index>
+
+关键词
+
+</search_code_index>
+
+<read_file>
+
+完整文件路径
+
+</read_file>
+
+<read_file_chunk>
+
+完整文件路径|||开始行|||结束行
+
+</read_file_chunk>
+
+<write_file>
+
+完整文件路径|||完整文件内容
+
+</write_file>
+
+<list_files>
+
+完整目录路径
+
+</list_files>
+
+<create_project_index>
+
+完整项目路径
+
+</create_project_index>
+
+<analyze_code>
+
+完整文件或目录路径
+
+</analyze_code>
+
+<run_command>
+
+Linux命令
+
+</run_command>
+
+<git_status>
+
+项目完整路径
+
+</git_status>
+
+<git_diff>
+
+项目完整路径
+
+</git_diff>
+
+<git_log>
+
+项目完整路径
+
+</git_log>
+
+<build_project>
+
+项目完整路径
+
+</build_project>
+
+<test_project>
+
+项目完整路径
+
+</test_project>
+
+<web_search>
+
+搜索关键词
+
+</web_search>
+
+<web_fetch>
+
+网页URL
+
+</web_fetch>
+
+<vscode_open>
+
+完整路径
+
+</vscode_open>
+
+重要规则：
+
+1. 你必须主动完成用户任务。
+
+2. 不要只给方案然后停止。
+
+3. 如果用户要求分析代码模块：
+
+禁止直接使用 analyze_code 分析整个项目。
+
+必须执行：
+
+search_code_index
+↓
+read_file 或 read_file_chunk
+↓
+analyze_code
+
+4. 如果连续两次使用同一个工具，
+必须改变策略。
+
+5. 如果任务已经获得足够信息，
+必须输出：
+
+<done>
+完成说明
+</done>
+
+3. 每次只能选择一个主要工具动作。
+
+4. 工具执行后会把结果返回给你。
+
+5. 根据结果决定下一步。
+
+6. 不允许编造文件、函数、路径或编译结果。
+
+7. 修改文件之前必须先读取真实文件。
+
+8. 修改大型文件时必须先分块读取相关区域。
+
+9. 编译失败后必须分析真实错误。
+
+10. 测试失败后必须分析真实测试输出。
+
+11. 修改后必须检查 git diff。
+
+12. 不要覆盖用户无关的已有修改。
+
+13. 如果任务已经完成，输出：
+
+<done>
+
+任务完成说明
+
+</done>
+
+14. 如果遇到无法安全执行的操作，输出：
+
+<need_user>
+
+需要用户决定的事情
+
+</need_user>
+
+自主开发流程：
+
+研究
+
+→ 定位
+
+→ 阅读
+
+→ 分析
+
+→ 规划
+
+→ 修改
+
+→ diff
+
+→ 编译
+
+→ 测试
+
+→ 失败则修复
+
+→ 再编译
+
+→ 再测试
+
+→ 完成
+
+当前执行步数：
+
+{self.step}/{self.max_steps}
+
+最近工具结果：
+
+{observation}
+
+历史：
+
+{history_text}
+
+现在决定下一步。
+
+如果需要工具，只输出一个工具标签。
+
+不要在工具标签之外输出解释。
+
+"""
+
+    # -------------------------------------------------
+
+    # Run
+
+    # -------------------------------------------------
+
+    def run(self, question):
+
+        self.step = 0
+
+
+        # V2.3 源码分析模式
+
+        source_keywords = [
+            "分析",
+            "源码",
+            "代码",
+            "实现",
+            "函数",
+            "模块",
+            "架构",
+            "机制",
+        ]
+
+
+        self.source_mode = any(
+            k in question
+            for k in source_keywords
+        )
+
+
+        self.source_started = False
+
+        self.history = []
+
+        state = self.load_state()
+
+        state.update({
+
+            "project": self.project,
+
+            "task": question,
+
+            "phase": "running",
+
+            "step": 0
+
+        })
+
+        self.save_state(state)
+
+        observation = "任务刚刚开始。"
+
+        print()
+
+        print("========================================")
+
+        print(" AI Programmer V2")
+
+        print("========================================")
+
+        print("项目:", self.project)
+
+        print("任务:", question)
+
+        print()
+
+        while self.step < self.max_steps:
+
+            self.step += 1
+
+            print()
+
+            print(
+
+                f"========== 自主执行 {self.step}/{self.max_steps} =========="
+
+            )
+
+            state["step"] = self.step
+
+            self.save_state(state)
+
+            # V2.3 强制源码搜索第一步
+
+            if (
+                getattr(self,"source_mode",False)
+                and not getattr(self,"source_started",False)
+            ):
+
+                if self.step == 1:
+
+                    text = (
+                        "<search_code_index>\n"
+                        + question
+                        + "\n</search_code_index>"
+                    )
+
+                    self.source_started=True
+
+                    print()
+
+                    print("AI决策:")
+
+                    print(text)
+
+                    name, raw = self.extract_tool(text)
+
+                    result = self.execute_tool(
+                        name,
+                        raw
+                    )
+
+                    observation = result
+
+                    self.history.append(
+                        result[:8000]
+                    )
+
+                    continue
+
+
+
+            prompt = self.build_prompt(
+
+                question,
+
+                observation
+
+            )
+
+            try:
+
+                response = self.llm.invoke(
+
+                    prompt
+
+                )
+
+                text = getattr(
+
+                    response,
+
+                    "content",
+
+                    str(response)
+
+                ).strip()
+
+            except Exception as e:
+
+                print("模型调用失败:", e)
+
+                observation = (
+
+                    "模型调用失败: "
+
+                    + str(e)
+
+                )
+
+                continue
+
+            print()
+
+            print("AI决策:")
+
+            print(text)
+
+            if "<done>" in text:
+
+                match = re.search(
+
+                    r"<done>(.*?)</done>",
+
+                    text,
+
+                    re.DOTALL
+
+                )
+
+                summary = (
+
+                    match.group(1).strip()
+
+                    if match
+
+                    else "任务完成"
+
+                )
+
+                state["phase"] = "completed"
+
+                state["result"] = summary
+
+                self.save_state(state)
+
+                print()
+
+                print("========================================")
+
+                print("任务完成")
+
+                print("========================================")
+
+                print(summary)
+
+                return summary
+
+            if "<need_user>" in text:
+
+                match = re.search(
+
+                    r"<need_user>(.*?)</need_user>",
+
+                    text,
+
+                    re.DOTALL
+
+                )
+
+                message = (
+
+                    match.group(1).strip()
+
+                    if match
+
+                    else "需要用户确认"
+
+                )
+
+                state["phase"] = "waiting_user"
+
+                state["waiting"] = message
+
+                self.save_state(state)
+
+                print()
+
+                print("需要你的决定:")
+
+                print(message)
+
+                return message
+
+            name, raw = self.extract_tool(text)
+
+
+            # V2.1 重复动作保护
+            if name:
+
+                if hasattr(self, "last_tool"):
+                    if (
+                        self.last_tool == name
+                        and self.history
+                    ):
+                        observation = (
+                            "检测到重复工具调用: "
+                            + name
+                            + "\n"
+                            "禁止重复执行，请改变策略。"
+                        )
+
+                        self.history.append(
+                            observation
+                        )
+
+                        continue
+
+
+                self.last_tool = name
+
+
+            if not name:
+
+                observation = (
+
+                    "工具格式错误。\n"
+
+                    "如果需要工具，必须严格输出:\n"
+
+                    "<工具名>参数</工具名>\n"
+
+                    "不要输出普通文字。"
+
+                )
+
+                self.history.append(
+
+                    "AI没有调用工具："
+
+                    + text
+
+                )
+
+                continue
+
+            print()
+
+            print("执行工具:", name)
+
+            result = self.execute_tool(
+
+                name,
+
+                raw
+
+            )
+
+            print()
+
+            print("工具结果:")
+
+            print(result[:12000])
+
+            observation = result
+
+            self.history.append(
+
+                "工具: "
+
+                + name
+
+                + "\n结果:\n"
+
+                + result[:8000]
+
+            )
+
+            state["last_tool"] = name
+
+            state["last_result"] = result[:8000]
+
+            state["phase"] = "running"
+
+            self.save_state(state)
+
+        state["phase"] = "max_steps"
+
+        self.save_state(state)
+
+        print()
+
+        print("达到最大自主执行步数。")
+
+        print("任务没有被判定为完成。")
+
+        return "达到最大自主执行步数"
+
