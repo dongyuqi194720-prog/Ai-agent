@@ -147,6 +147,33 @@ class AutonomousAgent:
 
         return False
 
+    def allow_tool(self, tool):
+
+        phase = self.state["phase"]
+
+        rules = {
+
+            "SEARCH": [
+                "search_code_index"
+            ],
+
+            "READ": [
+                "read_file_chunk"
+            ],
+
+            "ANALYZE": [
+                "analyze_code"
+            ],
+
+            "SUMMARY": []
+
+        }
+
+        return tool in rules.get(
+            phase,
+            []
+        )
+
     def build_prompt(
         self,
         question,
@@ -155,6 +182,24 @@ class AutonomousAgent:
 
         return f"""
 
+重要规则:
+
+一次回复只能调用一个工具。
+
+禁止同时输出多个:
+<search_code_index>
+<read_file_chunk>
+<analyze_code>
+
+完成一个工具后，
+等待下一轮。
+当前阶段:
+{self.state["phase"]}
+
+已完成:
+搜索={self.state["search_done"]}
+读取={self.state["read_done"]}
+分析={self.state["analyze_done"]}
 你是 AI Programmer 自主执行 Agent。
 
 项目:
@@ -281,6 +326,19 @@ analyze_code
                     "当前阶段:",
                     self.state["phase"]
                 )
+
+                continue
+
+            if not self.allow_tool(tool):
+
+                print(
+                    "当前阶段禁止执行:",
+                    tool,
+                    "当前阶段:",
+                    self.state["phase"]
+                )
+
+                self.state["phase"] = "SUMMARY"
 
                 continue
 
