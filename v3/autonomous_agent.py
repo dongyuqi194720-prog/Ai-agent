@@ -360,6 +360,25 @@ analyze_code
             tool, args = self.extract_tool(
                 response
             )
+
+            # V4.3.2 force read after search
+
+            if (
+                self.state["target_file"]
+                and tool == "search_code_index"
+            ):
+
+                print(
+                      "已有目标文件，禁止再次搜索"
+                )
+
+                tool = "read_file_chunk"
+
+                args = (
+                        self.state["target_file"]
+                        + "|1|100"
+                )
+
             # V4.3.1 phase guard
 
             if (
@@ -427,7 +446,21 @@ analyze_code
                 args
             )
 
+
+            # V4.3.2 reject directory read
+
             if tool == "read_file_chunk":
+
+                if args.strip() == self.project:
+
+                    print(
+                          "禁止读取项目目录"
+                    )
+
+                    args = (
+                            self.state["target_file"]
+                            + "|1|100"
+                    )
 
                 if "这是目录" not in result:
 
@@ -445,21 +478,13 @@ analyze_code
 
                 self.state["search_done"] = True
 
-            if self.state["target_file"]:
-
-                self.state["phase"] = "READ"
-
                 try:
                     import json
 
                     if isinstance(result, str):
-
                         data = json.loads(result)
-
                     else:
-
                         data = result
-
 
                     for item in data:
 
@@ -474,8 +499,9 @@ analyze_code
                                 file_path
                             )
 
-                            break
+                            self.state["phase"] = "READ"
 
+                            break
 
                 except Exception as e:
 
@@ -485,83 +511,24 @@ analyze_code
                     )
 
 
-            # 搜索完成后，把结果交给模型继续决定下一步
-            if tool == "search_code_index":
-
-                try:
-
-                    data = json.loads(
-                        result
-                    )
-
-
-                    if isinstance(data, list) and data:
-
-                        file = None
-
-                        for item in data:
-
-                            if "server-queue.cpp" in item.get(
-                                "file",
-                                ""
-                            ):
-
-                                file = item["file"]
-
-                                break
-
-
-                        if file is None:
-
-                            file = data[0].get(
-                                "file"
-                            )
-
-                        if file:
-
-                            print(
-                                "自动读取:",
-                                file
-                            )
-
-
-                            chunk = self.controller.call(
-                                "read_file_chunk",
-                                {
-                                    "path": file,
-                                    "start": 1,
-                                    "end": 200
-                                }
-                            )
-
-
-                            observation = chunk
-
-                            continue
-
-
-                except Exception as e:
-
-                    observation = str(result)
-
-                    continue
-
             if tool == "read_file_chunk":
 
                 parts = args.split("|")
 
-                if len(parts) >= 3:
+                if (
+                    self.state["target_file"]
+                    and parts[0] != self.state["target_file"]
+                ):
 
-                    path = parts[0]
+                    print(
+                        "修正读取目标:",
+                        parts[0],
+                        "->",
+                        self.state["target_file"]
+                    )
+                    parts[0] = self.state["target_file"]
 
-                    if (
-                        path.endswith("llama.cpp")
-                        and self.state["target_file"]
-                    ):
-
-                        parts[0] = self.state["target_file"]
-
-                        args = "|".join(parts)
+                    args = "|".join(parts)
 
             if tool == "read_file_chunk":
 
