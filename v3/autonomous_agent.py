@@ -182,6 +182,33 @@ class AutonomousAgent:
 
         return f"""
 
+当前 Agent 执行状态:
+
+阶段:
+{self.state["phase"]}
+
+规则:
+
+SEARCH阶段:
+只能执行:
+- search_code_index
+
+READ阶段:
+只能执行:
+- read_file_chunk
+
+ANALYZE阶段:
+只能执行:
+- analyze_code
+
+SUMMARY阶段:
+停止调用工具，输出总结。
+
+严格限制:
+1. 每次只能执行一个工具
+2. 工具返回后重新判断
+3. 不允许重复执行已经完成的阶段
+4. 不允许跳过阶段
 重要规则:
 
 一次回复只能调用一个工具。
