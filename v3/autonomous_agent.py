@@ -120,7 +120,32 @@ class AutonomousAgent:
 
         return None,None
 
+    def allow_tool(self, tool):
 
+        phase = self.state["phase"]
+
+
+        if phase == "SEARCH":
+
+            return tool == "search_code_index"
+
+
+        if phase == "READ":
+
+            return tool == "read_file_chunk"
+
+
+        if phase == "ANALYZE":
+
+            return tool == "analyze_code"
+
+
+        if phase == "SUMMARY":
+
+            return False
+
+
+        return False
 
     def build_prompt(
         self,
@@ -248,7 +273,16 @@ analyze_code
 
                 break
 
+            if not self.allow_tool(tool):
 
+                print(
+                    "当前阶段禁止执行:",
+                    tool,
+                    "当前阶段:",
+                    self.state["phase"]
+                )
+
+                continue
 
             print(
                 "执行工具:",
