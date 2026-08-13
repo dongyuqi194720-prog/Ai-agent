@@ -19,7 +19,9 @@ class Memory:
 
             "tools": [],
 
-            "errors": []
+            "errors": [],
+
+            "analysis_history": []
 
         }
 
@@ -124,6 +126,29 @@ class Memory:
 
         self.save()
 
+
+    def add_analysis(
+        self,
+        target,
+        result
+    ):
+
+        self.data["analysis_history"].append(
+
+            {
+
+                "time": time.time(),
+
+                "target": target,
+
+                "result": result
+
+            }
+
+        )
+
+
+        self.save()
 
 
     def repeated_tool(
