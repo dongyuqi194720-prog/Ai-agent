@@ -469,7 +469,8 @@ analyze_code
                 args
             )
 
-
+            print("DEBUG tool returned:", type(result))
+            print("DEBUG result length:", len(str(result)))
             # V4.3.2 reject directory read
 
             if tool == "read_file_chunk":
@@ -495,9 +496,15 @@ analyze_code
                 self.state["phase"] = "ANALYZE"
 
 
+
             if tool == "analyze_code":
 
-                self.state["analysis_result"] = (result)
+                print()
+                print("========== ANALYZE 完成 ==========")
+
+                self.state["analysis_result"] = result
+
+                print("DEBUG: 保存分析历史")
 
                 self.memory.add_analysis(
                     self.project,
@@ -505,50 +512,66 @@ analyze_code
                     result
                 )
 
-
-
+                print("DEBUG: 分析历史保存完成")
 
                 self.state["analyze_done"] = True
                 self.state["phase"] = "SUMMARY"
                 self.state["summary_done"] = False
                 self.state["can_modify"] = False
 
-            if self.state["phase"] == "SUMMARY" and not self.state["summary_done"]:
+                print(
+                    "DEBUG: 当前阶段 =",
+                    self.state["phase"]
+                )
+
+
+                analysis = self.state.get(
+                    "analysis_result",
+                    ""
+                )
+
+                print(
+                    "DEBUG: SUMMARY 使用分析结果长度 =",
+                    len(analysis)
+                )
 
                 prompt = f"""
-                你已经完成代码分析。
+根据下面的代码分析结果，写一个非常简短的报告。
 
-                分析结果如下:
+分析结果：
+{analysis[:4000]}
 
-                {self.state.get("analysis_result","")}
+只回答以下四项：
 
+1. 当前实现
+2. 主要问题
+3. 修改方案
+4. 测试建议
 
-                请输出最终报告:
+每项最多 2 句话。
+不要调用工具。
+不要重复源码。
+不要输出 git 提交步骤。
+"""
 
-                1. 当前实现分析
-                2. 存在的问题
-                3. 修改方案
-                4. 具体修改步骤
-                5. 测试步骤
-                6. git提交步骤
+                print("DEBUG: 开始生成 SUMMARY")
 
+                response = self.ask_llm(
+                    prompt
+                )
 
-                不要要求用户提供分析结果。
-                直接基于已有分析输出。
-                """
-                response = self.ask_llm(prompt)
+                print("DEBUG: SUMMARY 生成完成")
 
+                print()
+                print("========== 最终报告 ==========")
                 print(response)
 
                 self.state["summary_done"] = True
 
+                print()
+                print("========== 任务完成 ==========")
+
                 break
-                self.state["summary_done"] = False
-                self.state["can_modify"] = False
-
-                observation = result 
- 
-
             if tool == "search_code_index":
 
                 self.state["search_done"] = True
