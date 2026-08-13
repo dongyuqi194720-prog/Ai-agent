@@ -151,12 +151,10 @@ class AutonomousAgent:
             return tool == "analyze_code"
 
 
-        if phase == "SUMMARY":
+        if self.state["phase"] == "SUMMARY":
 
             return False
 
-
-        return False
 
     def allow_tool(self, tool):
 
@@ -349,6 +347,14 @@ analyze_code
             )
 
 
+            if self.state["phase"] == "SUMMARY" and self.state["analyze_done"]:
+
+                print("进入总结阶段")
+
+                print(observation)
+
+                break
+
             response = self.ask_llm(
                 prompt
             )
@@ -491,10 +497,48 @@ analyze_code
 
             if tool == "analyze_code":
 
+                self.state["analysis_result"] = (result)
+
                 self.state["analyze_done"] = True
                 self.state["phase"] = "SUMMARY"
                 self.state["summary_done"] = False
                 self.state["can_modify"] = False
+
+            if self.state["phase"] == "SUMMARY" and not self.state["summary_done"]:
+
+                prompt = f"""
+                你已经完成代码分析。
+
+                分析结果如下:
+
+                {self.state.get("analysis_result","")}
+
+
+                请输出最终报告:
+
+                1. 当前实现分析
+                2. 存在的问题
+                3. 修改方案
+                4. 具体修改步骤
+                5. 测试步骤
+                6. git提交步骤
+
+
+                不要要求用户提供分析结果。
+                直接基于已有分析输出。
+                """
+                response = self.ask_llm(prompt)
+
+                print(response)
+
+                self.state["summary_done"] = True
+
+                break
+                self.state["summary_done"] = False
+                self.state["can_modify"] = False
+
+                observation = result 
+ 
 
             if tool == "search_code_index":
 
