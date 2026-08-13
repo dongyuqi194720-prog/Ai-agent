@@ -499,6 +499,15 @@ analyze_code
 
                 self.state["analysis_result"] = (result)
 
+                self.memory.add_analysis(
+                    self.project,
+                    self.state["target_file"],
+                    result
+                )
+
+
+
+
                 self.state["analyze_done"] = True
                 self.state["phase"] = "SUMMARY"
                 self.state["summary_done"] = False
