@@ -71,6 +71,234 @@ class AutonomousAgent:
 
 
 
+    def validate_summary(
+        self,
+        response
+    ):
+        """
+        V4.4.2 SUMMARY Validator
+
+        验证 SUMMARY 中“主要问题”的证据与结论是否一致。
+
+        规则：
+        1. “未发现明确问题”不能出现在一个被判定为明确问题的条目中。
+        2. 仅描述代码行为，不能直接证明错误、冲突、崩溃、死锁等结论。
+        3. 如果主要问题只有行为描述，没有明确的因果证据，
+           则降级为“未发现明确问题”。
+        """
+
+        import re
+
+        if not response:
+            return response
+
+        match = re.search(
+            r"(2\.\s*主要问题.*?)(?=\n\s*3\.\s*修改方案)",
+            response,
+            re.S
+        )
+
+        if not match:
+            return response
+
+        problem_section = match.group(1)
+
+        # --------------------------------------------------
+        # V4.4.2 Rule 1:
+        # “未发现明确问题”不能同时作为明确问题结论。
+        # --------------------------------------------------
+
+        if "未发现明确问题" in problem_section:
+            print(
+                "DEBUG: SUMMARY Validator 检测到无明确问题结论"
+            )
+
+            return self._replace_summary_problem(
+                response,
+                match
+            )
+
+        # --------------------------------------------------
+        # V4.4.2 Rule 2:
+        # 明确缺陷结论必须存在因果证据。
+        #
+        # 这里只检查结构，不针对具体项目或函数硬编码。
+        # --------------------------------------------------
+
+        strong_claim_patterns = [
+            "会导致",
+            "导致",
+            "造成",
+            "会发生",
+            "会访问",
+            "会崩溃",
+            "会失败",
+            "会出错",
+            "会产生",
+            "存在bug",
+            "存在 bug",
+            "发生冲突",
+            "发生死锁",
+            "发生数据竞争",
+            "导致崩溃",
+            "导致错误",
+            "未定义行为",
+            "悬空指针",
+            "内存泄漏",
+            "数据竞争",
+            "死锁",
+            "ID 冲突",
+            "ID冲突",
+            "必然",
+        ]
+
+        has_strong_claim = any(
+            pattern in problem_section
+            for pattern in strong_claim_patterns
+        )
+
+        # --------------------------------------------------
+        # V4.4.4:
+        # 明确问题必须能够在“证据”中找到实际缺陷机制。
+        #
+        # 不能仅因为结论出现“会导致”就认为已经证明。
+        # 例如：
+        #
+        #   证据：task.id == -1 时调用 id++
+        #   结论：会导致 ID 冲突
+        #
+        # 证据只证明 ID 分配，没有证明冲突机制。
+        #
+        # 相反：
+        #
+        #   证据：已经释放对象后继续传递并解引用
+        #   结论：会访问已释放对象并导致未定义行为
+        #
+        # 证据本身已经包含明确的错误机制。
+        # --------------------------------------------------
+
+        evidence_match = re.search(
+            r"证据[：:]\s*(.*?)(?=\n\s*-\s*结论[：:]|\n\s*结论[：:]|\Z)",
+            problem_section,
+            re.S
+        )
+
+        conclusion_match = re.search(
+            r"结论[：:]\s*(.*?)(?=\n\s*-\s*(?:说明|证据|结论)[：:]|\n\s*3\.\s*修改方案|\Z)",
+            problem_section,
+            re.S
+        )
+
+        evidence_text = (
+            evidence_match.group(1).strip()
+            if evidence_match
+            else ""
+        )
+
+        conclusion_text = (
+            conclusion_match.group(1).strip()
+            if conclusion_match
+            else ""
+        )
+
+        mechanism_patterns = [
+            "已经释放",
+            "已释放",
+            "释放后",
+            "释放之后",
+            "继续使用",
+            "继续传递",
+            "随后解引用",
+            "解引用",
+            "访问已经释放",
+            "访问已释放",
+            "越界访问",
+            "越界写入",
+            "越界读取",
+            "未初始化",
+            "未初始化数据",
+            "重复释放",
+            "double free",
+            "use-after-free",
+            "空指针解引用",
+            "悬空指针",
+            "数据竞争",
+            "死锁",
+            "锁顺序",
+            "等待自身",
+            "无限循环",
+            "无限递归",
+            "重复插入",
+            "重复添加",
+            "覆盖已有",
+            "丢失数据",
+            "错误返回",
+        ]
+
+        has_mechanism = any(
+            pattern in evidence_text
+            for pattern in mechanism_patterns
+        )
+
+        # 如果结论声称存在明确缺陷，但证据中没有发现
+        # 对应的错误机制，则降级。
+        if has_strong_claim and not has_mechanism:
+            print(
+                "DEBUG: SUMMARY Validator 检测到"
+                "“明确问题”缺少证据机制"
+            )
+
+            return self._replace_summary_problem(
+                response,
+                match
+            )
+
+        return response
+
+
+    def _replace_summary_problem(
+        self,
+        response,
+        match
+    ):
+        """
+        将无法证明的主要问题统一降级。
+        """
+
+        import re
+
+        replacement = """2. 主要问题
+   - 未发现明确问题。
+
+3. 修改方案
+   - 当前未发现需要修改的明确问题。
+"""
+
+        after_problem = response[match.end():]
+
+        # 原来的 response 已经包含“3. 修改方案”，
+        # 因此只删除原问题区和原修改方案区，
+        # 再重新插入统一结果。
+
+        modification_match = re.search(
+            r"\n\s*3\.\s*修改方案.*?(?=\n\s*4\.\s*测试建议)",
+            after_problem,
+            re.S
+        )
+
+        if modification_match:
+            after_problem = (
+                after_problem[:modification_match.start()]
+                + after_problem[modification_match.end():]
+            )
+
+        return (
+            response[:match.start()]
+            + replacement
+            + after_problem
+        )
+
+
     def extract_tool(
         self,
         text
@@ -519,27 +747,112 @@ analyze_code
                 self.state["summary_done"] = False
                 self.state["can_modify"] = False
 
-                print(
-                    "DEBUG: 当前阶段 =",
-                    self.state["phase"]
-                )
-
-
                 analysis = self.state.get(
                     "analysis_result",
                     ""
                 )
 
                 print(
-                    "DEBUG: SUMMARY 使用分析结果长度 =",
+                    "DEBUG: ANALYZE 原始结果长度 =",
                     len(analysis)
                 )
 
-                prompt = f"""
-根据下面的代码分析结果，写一个非常简短的报告。
+                # V4.4 chunked analysis
+                # 不把完整源码一次性送入 SUMMARY。
+                # 将分析结果分成最多 3 个源码块，
+                # 分别让 LLM 提取关键实现信息。
 
-分析结果：
-{analysis[:4000]}
+                chunk_size = 3000
+                chunks = [
+                    analysis[i:i + chunk_size]
+                    for i in range(
+                        0,
+                        len(analysis),
+                        chunk_size
+                    )
+                ]
+
+                chunks = chunks[:3]
+
+                self.state["analysis_context"] = []
+
+                print(
+                    "DEBUG: ANALYZE 分块数量 =",
+                    len(chunks)
+                )
+
+                for i, chunk in enumerate(chunks):
+
+                    print(
+                        "DEBUG: 分析源码块",
+                        i + 1,
+                        "/",
+                        len(chunks),
+                        "长度 =",
+                        len(chunk)
+                    )
+
+                    chunk_prompt = f"""
+分析下面的代码分析结果片段。
+
+这是第 {i + 1} / {len(chunks)} 个片段。
+
+代码分析结果片段：
+{chunk}
+
+请只提取与代码理解有关的事实：
+
+1. 主要实现和职责
+2. 关键函数或数据结构
+3. 并发、队列、状态或资源管理机制
+4. 明显的风险或值得注意的地方
+
+不要猜测没有出现的代码。
+不要提出泛泛的修改建议。
+不要重复大段源码。
+使用简短中文回答。
+"""
+
+                    chunk_analysis = self.ask_llm(
+                        chunk_prompt
+                    )
+
+                    self.state["analysis_context"].append(
+                        chunk_analysis
+                    )
+
+                    print(
+                        "DEBUG: 源码块",
+                        i + 1,
+                        "分析完成，结果长度 =",
+                        len(str(chunk_analysis))
+                    )
+
+                combined_analysis = "\n\n".join(
+                    self.state["analysis_context"]
+                )
+
+                print(
+                    "DEBUG: 分块分析结果总长度 =",
+                    len(combined_analysis)
+                )
+
+                summary_prompt = f"""
+根据下面的原始代码分析结果和分块分析结果，写一个非常简短的最终报告。
+
+【原始代码分析结果】
+{analysis[:12000]}
+
+【分块分析结果】
+{combined_analysis}
+
+重要规则：
+1. 原始代码分析结果是最高优先级证据。
+2. 分块分析结果只是辅助理解，不能覆盖原始代码中的事实。
+3. 如果分块分析与原始代码分析结果冲突，以原始代码分析结果为准。
+4. 不得根据常识补充源码中没有出现的行为。
+5. 不得把“可能存在”写成“已经存在”。
+6. 如果无法从代码中确认问题，必须写“未发现明确问题”。
 
 只回答以下四项：
 
@@ -549,18 +862,165 @@ analyze_code
 4. 测试建议
 
 每项最多 2 句话。
+
+必须基于分块分析中明确出现的信息。
+
+问题判断规则：
+
+1. “主要问题”只能填写已经被源码直接证明的问题，不能填写普通设计选择、潜在风险、改进建议或“需要确认”的事项。
+
+2. 每一个“主要问题”必须同时满足以下三个条件：
+   - 能指出具体函数、变量、数据结构或代码语句；
+   - 能说明该代码实际执行了什么行为；
+   - 能明确说明为什么这个行为构成错误、缺陷或违反预期。
+   如果缺少其中任何一项，就不能列为“主要问题”。
+
+3. 每个主要问题必须按照下面格式输出：
+
+   - 证据：指出具体函数、变量或代码行为。
+   - 结论：说明该行为已经造成的明确错误或缺陷。
+
+   “证据”只是证明代码做了什么，不能直接等于“问题”。
+   必须同时证明为什么该行为是错误的。
+
+   例如：
+   “task.id == -1 时调用 id++”
+   只能证明代码会分配 ID，
+   不能据此推出“会发生 ID 冲突”。
+
+   如果源码没有证明冲突实际可能发生，就必须写：
+   “未发现明确问题”。
+
+
+3. 以下情况默认不能判定为问题：
+   - 调用了另一个函数，但没有证据证明该调用错误；
+   - 使用 mutex、condition_variable、线程、队列或状态变量，但没有具体的数据竞争、死锁、逻辑错误证据；
+   - 参数可能为特殊值，但代码已经对该值进行了明确处理；
+   - 某个行为“可能导致”问题，但没有源码证据证明实际会发生；
+   - 仅仅认为代码可以“更安全”“更完善”或“应该增加检查”。
+
+4. 特别注意：
+   - 不要把“代码存在某个分支”写成“该分支存在 bug”。
+   - 不要把“调用 cleanup_pending_task”直接判定为错误，除非能从源码证明该调用会产生错误结果。
+   - 不要把 task.id == -1 自动判定为问题；必须区分不同 post 重载中的实际处理逻辑。
+   - 如果代码通过 GGML_ASSERT、条件判断、锁或其他机制已经处理了某种情况，不要重复把该情况报告成未处理问题。
+
+5. 如果只能发现潜在风险，写成“潜在风险”，不要写成“主要问题”。
+
+5.1 “当前实现”同样必须严格区分代码事实和推测：
+   - 只能描述源码中已经确认发生的行为。
+   - 禁止把“可能导致”“可能造成”“可能发生”“存在风险”等推测性结论，
+     当作当前实现的确定事实。
+   - 例如：
+     “task.id == -1 时调用 id++”
+     可以作为代码事实。
+   - 但：
+     “task.id == -1 时可能导致 ID 冲突”
+     只有在源码中已经证明存在重复 ID 的具体机制时才能写。
+   - 如果没有证明冲突机制，只能描述实际代码行为，
+     不得自行扩展成风险判断。
+   - 测试建议可以验证这种行为，但测试建议不能反向证明代码存在问题。
+
+6. 如果没有足够证据确认问题，必须明确写：
+   “未发现明确问题。”
+   不得为了填充报告而强行提出问题。
+
+7. “修改方案”必须严格服从“主要问题”，两者一一对应。
+
+   如果“主要问题”中写的是：
+   “未发现明确问题。”
+   那么“修改方案”必须原样写：
+   “当前未发现需要修改的明确问题。”
+
+   禁止在这种情况下提出任何新增检查、增加锁、增加异常处理、
+   增加 ID 校验、修改函数逻辑或其他改进建议。
+
+   只有当“主要问题”已经证明存在明确错误或缺陷时，
+   才允许提出对应的修改方案。
+
+   修改方案不得使用“建议检查”“可以增加”“应该添加”“建议完善”
+   等没有明确问题依据的改进性表述。
+
+8. 测试建议可以针对关键行为，但不得把测试建议反过来当成代码存在问题的证据。
+
+9. 最终报告中的每个问题，都必须能够在原始代码分析结果中找到对应证据。
+
+10. “当前实现”只能描述源码中已经确认发生的代码行为。
+    禁止在“当前实现”中加入未经证明的因果判断。
+
+    例如：
+    “post 方法在 task.id == -1 时调用 id++”
+    是合法的事实描述。
+
+    但：
+    “post 方法在 task.id == -1 时调用 id++，可能导致 ID 冲突”
+    不合法，因为源码没有证明 ID 冲突实际发生。
+
+    如果无法证明错误，只描述代码行为本身。
+
+11. “测试建议”只能描述需要验证的行为，
+    不得通过测试目标暗示代码已经存在问题。
+
+    错误：
+    “测试 ID 分配，确保不会分配新的 ID。”
+
+    正确：
+    “测试 task.id == -1 时的 ID 分配行为。”
+
+12. 四个报告部分必须保持严格的语义边界：
+
+    当前实现 = 已确认的代码事实。
+    主要问题 = 已经被源码证明的明确缺陷。
+    修改方案 = 只针对已经证明的明确缺陷。
+    测试建议 = 对关键行为进行中性验证。
+
+    不允许通过“当前实现”或“测试建议”绕过“主要问题”的证据要求。
+
+13. 如果“主要问题”最终为“未发现明确问题”，
+    “当前实现”仍然可以正常描述代码行为，
+    但不得把这些行为描述成风险、缺陷或可能导致的问题。
+
+14. “测试建议”必须保持中性。
+    如果“主要问题”为“未发现明确问题”，
+    测试建议只能描述需要验证的实际代码行为，
+    不得加入未经证明的缺陷假设。
+
+    例如：
+
+    错误：
+    “测试 task.id == -1 时的 ID 分配行为，确保不会发生 ID 冲突。”
+
+    正确：
+    “测试 task.id == -1 时的 ID 分配行为。”
+
+    禁止使用以下方式暗示未证明的问题：
+    - 确保不会发生……
+    - 确保不会导致……
+    - 验证是否存在……
+    - 防止……
+    - 避免……
+    - 确保不会冲突……
+
+    除非“主要问题”已经由源码明确证明对应缺陷，
+    否则测试建议不得把某种结果预设为错误。
+
 不要调用工具。
 不要重复源码。
 不要输出 git 提交步骤。
 """
 
+                print("DEBUG: 当前阶段 =", self.state["phase"])
                 print("DEBUG: 开始生成 SUMMARY")
 
                 response = self.ask_llm(
-                    prompt
+                    summary_prompt
                 )
 
                 print("DEBUG: SUMMARY 生成完成")
+
+                response = self.validate_summary(
+                    response
+                )
 
                 print()
                 print("========== 最终报告 ==========")
@@ -572,6 +1032,7 @@ analyze_code
                 print("========== 任务完成 ==========")
 
                 break
+
             if tool == "search_code_index":
 
                 self.state["search_done"] = True
