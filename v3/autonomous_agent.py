@@ -28,6 +28,8 @@ class AutonomousAgent:
 
             "analyze_done": False,
 
+            "verify_done": False,
+
             "summary_done": False,
 
             "can_modify": False,
@@ -402,6 +404,8 @@ class AutonomousAgent:
                 "analyze_code"
             ],
 
+            "VERIFY": [],
+
             "SUMMARY": []
 
         }
@@ -575,7 +579,25 @@ analyze_code
             )
 
 
-            if self.state["phase"] == "SUMMARY" and self.state["analyze_done"]:
+            if (
+                self.state["phase"] == "VERIFY"
+                and self.state["analyze_done"]
+                and not self.state["verify_done"]
+            ):
+
+                print("VERIFY: 当前版本执行内部证据状态确认")
+
+                self.state["verify_done"] = True
+                self.state["phase"] = "SUMMARY"
+
+                continue
+
+
+            if (
+                self.state["phase"] == "SUMMARY"
+                and self.state["analyze_done"]
+                and self.state["verify_done"]
+            ):
 
                 print("进入总结阶段")
 
@@ -743,7 +765,16 @@ analyze_code
                 print("DEBUG: 分析历史保存完成")
 
                 self.state["analyze_done"] = True
-                self.state["phase"] = "SUMMARY"
+                self.state["verify_done"] = False
+
+                print("========== VERIFY 阶段 ==========")
+
+                # V4.5.1:
+                # 先建立独立 VERIFY 状态。
+                # 当前版本暂不增加新的工具调用，
+                # 只验证状态机能够稳定经过 VERIFY。
+                self.state["phase"] = "VERIFY"
+
                 self.state["summary_done"] = False
                 self.state["can_modify"] = False
 
