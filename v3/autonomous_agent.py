@@ -592,24 +592,50 @@ analyze_code
                     ""
                 )
 
-                # V4.5.2:
-                # VERIFY 第一阶段只检查分析结果状态。
+                # V4.5.3:
+                # VERIFY 不再只检查 analysis_result 是否存在，
+                # 而是检查分析结果是否包含“证据 + 结论”结构。
                 #
-                # 通过条件：
-                # 1. ANALYZE 已完成
-                # 2. analysis_result 存在
-                # 3. analysis_result 非空
+                # 明确问题必须同时具备：
+                # 1. 证据描述
+                # 2. 结论描述
                 #
-                # 检查失败：
-                # VERIFY -> ANALYZE
-                #
-                # 检查通过：
-                # VERIFY -> SUMMARY
+                # 只有“当前实现”或代码行为描述，
+                # 不足以证明存在明确问题。
+
+                import re
+
+                analysis_text = str(analysis).strip()
+
+                evidence_count = len(
+                    re.findall(
+                        r"(证据|依据|因为|导致|因此)",
+                        analysis_text
+                    )
+                )
+
+                conclusion_count = len(
+                    re.findall(
+                        r"(结论|问题|错误|冲突|异常|失败|未定义行为|死锁)",
+                        analysis_text
+                    )
+                )
 
                 verify_ok = (
                     self.state["analyze_done"]
-                    and bool(analysis)
-                    and bool(str(analysis).strip())
+                    and bool(analysis_text)
+                    and evidence_count > 0
+                    and conclusion_count > 0
+                )
+
+                print(
+                    "VERIFY: evidence_count =",
+                    evidence_count
+                )
+
+                print(
+                    "VERIFY: conclusion_count =",
+                    conclusion_count
                 )
 
                 if verify_ok:
