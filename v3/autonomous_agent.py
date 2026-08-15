@@ -1253,23 +1253,47 @@ analyze_code
                     else:
                         data = result
 
+                    found = False
+
                     for item in data:
 
                         file_path = item.get("file", "")
 
-                        if "server-queue.cpp" in file_path:
+                        if file_path:
 
-                            self.state["target_file"] = file_path
+                            if "server-queue.cpp" in file_path:
 
-                            print(
-                                "锁定目标文件:",
-                                file_path
-                            )
+                                self.state["target_file"] = file_path
 
-                            self.state["phase"] = "READ"
+                                print(
+                                    "锁定目标文件:",
+                                    file_path
+                                )
 
-                            break
+                                found = True
 
+                                break
+
+
+                    # V4.6.0 fallback
+                    # 没找到指定文件时，使用搜索第一结果
+
+                    if not found and len(data) > 0:
+
+                        self.state["target_file"] = data[0].get(
+                            "file",
+                            ""
+                        )
+
+                        print(
+                            "fallback target:",
+                            self.state["target_file"]
+                        )
+
+
+                    if self.state["target_file"]:
+
+                        self.state["phase"] = "READ"
                 except Exception as e:
 
                     print(
