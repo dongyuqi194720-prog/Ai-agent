@@ -585,10 +585,55 @@ analyze_code
                 and not self.state["verify_done"]
             ):
 
-                print("VERIFY: 当前版本执行内部证据状态确认")
+                print("========== VERIFY ==========")
 
-                self.state["verify_done"] = True
-                self.state["phase"] = "SUMMARY"
+                analysis = self.state.get(
+                    "analysis_result",
+                    ""
+                )
+
+                # V4.5.2:
+                # VERIFY 第一阶段只检查分析结果状态。
+                #
+                # 通过条件：
+                # 1. ANALYZE 已完成
+                # 2. analysis_result 存在
+                # 3. analysis_result 非空
+                #
+                # 检查失败：
+                # VERIFY -> ANALYZE
+                #
+                # 检查通过：
+                # VERIFY -> SUMMARY
+
+                verify_ok = (
+                    self.state["analyze_done"]
+                    and bool(analysis)
+                    and bool(str(analysis).strip())
+                )
+
+                if verify_ok:
+
+                    print(
+                        "VERIFY: 分析结果状态检查通过"
+                    )
+
+                    self.state["verify_done"] = True
+                    self.state["phase"] = "SUMMARY"
+
+                else:
+
+                    print(
+                        "VERIFY: 分析结果状态检查失败"
+                    )
+
+                    print(
+                        "VERIFY: 回退 ANALYZE"
+                    )
+
+                    self.state["verify_done"] = False
+                    self.state["analyze_done"] = False
+                    self.state["phase"] = "ANALYZE"
 
                 continue
 
