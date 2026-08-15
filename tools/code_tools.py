@@ -150,22 +150,216 @@ def search_code_index(keyword:str):
             index=json.load(f)
 
 
-        result=[]
+        keyword = keyword.lower()
 
-        keyword=keyword.lower()
+
+        expand = {
+            "mutex": [
+                "mutex",
+                "thread",
+                "lock",
+                "condition",
+                "queue",
+                "worker",
+                "scheduler",
+                "server"
+            ],
+            "thread": [
+                "thread",
+                "mutex",
+                "lock",
+                "worker",
+                "scheduler"
+            ]
+        }
+
+
+        keywords = expand.get(
+            keyword,
+            [keyword]
+        )
+
+
+        result=[]
 
 
         for item in index.get("files", []):
 
-            text=json.dumps(
+            text_blob = json.dumps(
                 item,
                 ensure_ascii=False
             ).lower()
 
 
-            if keyword in text:
+            matched = False
+
+            for k in keywords:
+
+                if k in text_blob:
+                    matched = True
+                    break
+
+
+            if matched:
+
+                file_path = item.get(
+                    "file",
+                    ""
+                ).lower()
+
+
+                # V4.6.6 source filter
+
+                if (
+                    "/build/" in file_path
+                    or
+                    "cmakefiles" in file_path
+                    or
+                    file_path.endswith(".cmake")
+                ):
+                    continue
+
+
+                score = 0
+
+
+                if file_path.endswith(
+                    (
+                        ".cpp",
+                        ".cc",
+                        ".h",
+                        ".hpp"
+                    )
+                ):
+                    score += 50
+
+
+                if "/tools/server/" in file_path:
+                    score += 200
+
+
+                if "server" in file_path:
+                    score += 100
+
+
+                if "/tools/" in file_path:
+                    score += 30
+
+
+                if "/ggml/" in file_path:
+                    score += 5
+
+
+                if keyword in file_path:
+                    score += 50
+
+
+                # V4.6.7 content relevance
+
+                item_text = json.dumps(
+                    item,
+                    ensure_ascii=False
+                ).lower()
+
+
+                if keyword in item_text:
+                    score += 100
+
+
+                # V4.6.8 symbol relevance
+
+                # V4.6.9 mutex specific ranking
+
+                strong_symbols = [
+                    "mutex",
+                    "lock_guard",
+                    "unique_lock",
+                    "condition_variable",
+                    "std::mutex"
+                ]
+
+
+                weak_symbols = [
+                    "thread",
+                    "worker"
+                ]
+
+
+                for sym in strong_symbols:
+
+                    if sym in item_text:
+                        score += 120
+
+
+                for sym in weak_symbols:
+
+                    if sym in item_text:
+                        score += 20
+
+
+                # avoid tool/helper files for mutex analysis
+
+                if (
+                    "server-tools.cpp" in file_path
+                    and
+                    keyword == "mutex"
+                ):
+                    score -= 200
+
+
+                # prefer implementation files
+
+                if file_path.endswith(
+                    (
+                        ".cpp",
+                        ".cc"
+                    )
+                ):
+                    score += 60
+
+
+                # avoid helper headers
+
+                if (
+                    file_path.endswith(".h")
+                    and
+                    (
+                        "common" in file_path
+                        or
+                        "proxy" in file_path
+                    )
+                ):
+                    score -= 100
+
+
+                if (
+                    "mutex" in item_text
+                    and
+                    (
+                        "lock" in item_text
+                        or
+                        "thread" in item_text
+                        or
+                        "condition" in item_text
+                    )
+                ):
+                    score += 100
+
+
+                # ignore tiny entry files
+
+                if (
+                    item.get("lines",0) < 50
+                    and
+                    "main.cpp" in file_path
+                ):
+                    score -= 200
+
+
+                item["_score"] = score
 
                 result.append(item)
+
 
 
         if not result:
@@ -173,8 +367,17 @@ def search_code_index(keyword:str):
             return "没有找到相关代码"
 
 
+        result.sort(
+            key=lambda x:x.get(
+                "_score",
+                0
+            ),
+            reverse=True
+        )
+
+
         return json.dumps(
-            result[:30],
+            result[:10],
             ensure_ascii=False,
             indent=2
         )
@@ -183,7 +386,6 @@ def search_code_index(keyword:str):
     except Exception as e:
 
         return f"搜索索引失败:{e}"
-
 
 
 def split_code(content, size=4000):

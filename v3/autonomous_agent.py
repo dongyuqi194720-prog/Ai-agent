@@ -319,6 +319,44 @@ class AutonomousAgent:
 
             args = m.group(1).strip()
 
+
+            # V4.6.2 Search Input Guard
+            # 防止模型把项目路径当搜索关键词
+
+            if args.startswith("/home/"):
+
+                question = self.state.get(
+                    "question",
+                    ""
+                ).lower()
+
+
+                keywords = [
+                    "mutex",
+                    "thread",
+                    "queue",
+                    "server",
+                    "scheduler",
+                    "worker",
+                    "lock",
+                ]
+
+
+                for k in keywords:
+
+                    if k in question:
+
+                        print(
+                            "修正搜索关键词:",
+                            args,
+                            "->",
+                            k
+                        )
+
+                        args = k
+                        break
+
+
             if "server_queue" in args:
 
                 args = "server_queue"
@@ -1088,7 +1126,27 @@ analyze_code
                 self.state["target_file"]
                 )
 
-            # V4.3.1 phase guard
+            # V4.7.3 READ 阶段强制使用真实 target_file
+            #
+            # 一旦 SEARCH 已经确定 target_file，
+            # READ 阶段禁止 LLM 自己决定读取路径。
+            # 防止模型把 project 根目录、错误文件或其他路径
+            # 作为 read_file_chunk 参数。
+            if (
+                self.state["phase"] == "READ"
+                and self.state["target_file"]
+            ):
+
+                target = self.state["target_file"]
+
+                print(
+                    "V4.7.3 强制 READ target:",
+                    target
+                )
+
+                tool = "read_file_chunk"
+
+                args = f"{target}|1|100"
 
             if (
                 self.state["phase"] == "READ"
@@ -1178,40 +1236,61 @@ analyze_code
 
                 print("DEBUG: 开始 LLM 分析")
 
+                # V4.7.1
+                # 限制 ANALYZE 输入规模，避免大型源码导致本地模型长时间推理。
+                MAX_ANALYSIS_CHARS = 4000
+
+                analysis_source = str(result)
+
+                print(
+                    "DEBUG: ANALYZE 原始输入长度 =",
+                    len(analysis_source)
+                )
+
+                if len(analysis_source) > MAX_ANALYSIS_CHARS:
+
+                    analysis_source = (
+                        analysis_source[:MAX_ANALYSIS_CHARS]
+                        + "\n\n[源码已由 V4.7.1 截断]"
+                    )
+
+                    print(
+                        "DEBUG: ANALYZE 输入已压缩为 =",
+                        len(analysis_source)
+                    )
+
                 analysis_prompt = f"""
-                请分析下面源码。
+请分析下面的 C/C++ 源码。
 
-                源码:
-                {result}
+源码:
+{analysis_source}
 
-                要求输出：
+请简洁回答：
 
-                1. 文件职责
-                2. 核心数据结构
-                3. 关键函数流程
-                4. 并发、队列、状态管理机制
-                5. 潜在风险
+1. 文件职责
+2. 核心数据结构
+3. 关键流程
+4. mutex / lock / 线程并发机制
+5. 是否存在明确的并发风险
 
-                如果发现问题，必须严格使用：
+如果发现明确问题，严格输出：
 
-                证据:
-                xxx
+证据:
+xxx
 
-                结论:
-                xxx
+结论:
+xxx
 
-                如果没有明确问题，请输出：
+如果没有明确问题：
+未发现明确问题
 
-                未发现明确问题
-
-                不要重复源码。
-                不要猜测不存在的代码。
-                使用中文简短回答。
-                """
-
+只根据给出的源码判断，不要猜测未提供的代码。
+不要重复源码。
+使用简短中文回答。
+"""
 
                 analysis_result = self.ask_llm(
-                analysis_prompt
+                    analysis_prompt
                 )
 
 
@@ -1241,6 +1320,7 @@ analyze_code
                 # SUMMARY 生成必须等待下一轮 VERIFY 通过。
                 continue
 
+
             if tool == "search_code_index":
 
                 self.state["search_done"] = True
@@ -1253,90 +1333,91 @@ analyze_code
                     else:
                         data = result
 
-                    found = False
+
+                    best_file = ""
+                    best_score = -1
+
 
                     for item in data:
 
-                        file_path = item.get("file", "")
+                        file_path = item.get(
+                            "file",
+                            ""
+                        )
 
-                        if file_path:
+                        if not file_path:
+                            continue
 
-                            if "server-queue.cpp" in file_path:
 
-                                self.state["target_file"] = file_path
+                        lower = file_path.lower()
 
-                                print(
-                                    "锁定目标文件:",
-                                    file_path
-                                )
+                        score = 0
 
-                                found = True
 
-                                break
+                        if lower.endswith(".cpp"):
+                            score += 20
 
-                    # V4.6.1 search ranking fallback
+                        if "/tools/server/" in lower:
+                            score += 80
 
-                    if not found and len(data) > 0:
+                        if "/src/" in lower:
+                            score += 30
+
 
                         keywords = [
                             "mutex",
                             "thread",
+                            "lock",
                             "queue",
                             "server",
                             "scheduler",
-                            "worker"
+                            "worker",
                         ]
 
-                        best_file = ""
-                        best_score = -1
+
+                        for k in keywords:
+
+                            if k in lower:
+                                score += 15
 
 
-                        for item in data:
-
-                            file_path = item.get(
-                                "file",
-                                ""
-                            )
-
-                            score = 0
-
-                            lower = file_path.lower()
+                        bad = [
+                            "examples",
+                            "perplexity",
+                            "test",
+                            "cmakelists",
+                        ]
 
 
-                            for k in keywords:
+                        for b in bad:
 
-                                if k in lower:
-                                    score += 10
-
-
-                            if "/server/" in lower:
-                                score += 20
+                            if b in lower:
+                                score -= 50
 
 
-                            if "/ggml/src/" in lower:
-                                score += 5
+                        if score > best_score:
+
+                            best_score = score
+                            best_file = file_path
 
 
-                            if score > best_score:
 
-                                best_score = score
-                                best_file = file_path
+                    self.state["target_file"] = best_file
 
 
-                        self.state["target_file"] = best_file
-
-
-                        print(
-                            "scored fallback target:",
-                            best_file,
-                            "score:",
-                            best_score
-                        )
+                    print(
+                        "V4.6.3 ranked target:",
+                        best_file,
+                        "score:",
+                        best_score
+                    )
 
 
                     if self.state["target_file"]:
 
                         self.state["phase"] = "READ"
+
+
                 except Exception as e:
 
                     print(
