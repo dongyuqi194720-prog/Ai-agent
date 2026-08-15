@@ -365,31 +365,6 @@ class AutonomousAgent:
 
         phase = self.state["phase"]
 
-
-        if phase == "SEARCH":
-
-            return tool == "search_code_index"
-
-
-        if phase == "READ":
-
-            return tool == "read_file_chunk"
-
-
-        if phase == "ANALYZE":
-
-            return tool == "analyze_code"
-
-
-        if self.state["phase"] == "SUMMARY":
-
-            return False
-
-
-    def allow_tool(self, tool):
-
-        phase = self.state["phase"]
-
         rules = {
 
             "SEARCH": [
@@ -607,6 +582,21 @@ analyze_code
 
                 analysis_text = str(analysis).strip()
 
+                print(
+                    "VERIFY: analysis type =",
+                    type(analysis)
+                )
+
+                print(
+                    "VERIFY: analysis length =",
+                    len(analysis_text)
+                )
+
+                print(
+                    "VERIFY: analysis preview =",
+                    repr(analysis_text[:1000])
+                )
+
                 evidence_count = len(
                     re.findall(
                         r"(证据|依据|因为|导致|因此)",
@@ -621,11 +611,108 @@ analyze_code
                     )
                 )
 
-                verify_ok = (
-                    self.state["analyze_done"]
-                    and bool(analysis_text)
-                    and evidence_count > 0
-                    and conclusion_count > 0
+                # V4.5.5:
+                # 如果分析结果明确表示“未发现明确问题”，
+                # 则该结果本身属于合法的 VERIFY 结果。
+                #
+                # 只有当分析结果明确提出问题时，
+                # 才要求同时存在证据与结论关联。
+                no_clear_problem = (
+                    "未发现明确问题" in analysis_text
+                )
+
+                evidence_tokens = (
+                    "证据",
+                    "依据",
+                    "因为",
+                    "导致",
+                    "因此",
+                )
+
+                conclusion_tokens = (
+                    "结论",
+                    "问题",
+                    "错误",
+                    "冲突",
+                    "异常",
+                    "失败",
+                    "未定义行为",
+                    "死锁",
+                )
+
+                fragments = re.split(
+                    r"[。！？!?.\n]+",
+                    analysis_text
+                )
+
+                evidence_conclusion_linked = False
+
+                for fragment in fragments:
+
+                    fragment = fragment.strip()
+
+                    if not fragment:
+                        continue
+
+                    has_evidence = any(
+                        token in fragment
+                        for token in evidence_tokens
+                    )
+
+                    has_conclusion = any(
+                        token in fragment
+                        for token in conclusion_tokens
+                    )
+
+                    if has_evidence and has_conclusion:
+                        evidence_conclusion_linked = True
+                        break
+
+                if no_clear_problem:
+
+                    verify_ok = (
+                        self.state["analyze_done"]
+                        and bool(analysis_text)
+                    )
+
+                else:
+
+                    verify_ok = (
+                        self.state["analyze_done"]
+                        and bool(analysis_text)
+                        and evidence_count > 0
+                        and conclusion_count > 0
+                        and evidence_conclusion_linked
+                    )
+
+                print(
+                    "VERIFY: evidence_count =",
+                    evidence_count
+                )
+
+                print(
+                    "VERIFY: conclusion_count =",
+                    conclusion_count
+                )
+
+                print(
+                    "VERIFY: evidence_conclusion_linked =",
+                    evidence_conclusion_linked
+                )
+
+                print(
+                    "VERIFY: no_clear_problem =",
+                    no_clear_problem
+                )
+
+                print(
+                    "VERIFY: conclusion_count =",
+                    conclusion_count
+                )
+
+                print(
+                    "VERIFY: evidence_conclusion_linked =",
+                    evidence_conclusion_linked
                 )
 
                 print(
@@ -672,191 +759,9 @@ analyze_code
 
                 print("进入总结阶段")
 
-                print(observation)
-
-                break
-
-            response = self.ask_llm(
-                prompt
-            )
-
-
-            print(response)
-
-
-            tool, args = self.extract_tool(
-                response
-            )
-
-            # V4.3.2 force read after search
-
-            if (
-                self.state["target_file"]
-                and tool == "search_code_index"
-            ):
-
-                print(
-                      "已有目标文件，禁止再次搜索"
-                )
-
-                tool = "read_file_chunk"
-
-                args = (
-                        self.state["target_file"]
-                        + "|1|100"
-                )
-
-            # V4.3.4 force analyze phase
-
-            if (
-                self.state["phase"] == "ANALYZE"
-                and tool != "analyze_code"
-            ):
-
-                print(
-                      "分析阶段强制执行 analyze_code"
-                )
-
-                tool = "analyze_code"
-
-                args = (
-                self.state["target_file"]
-                )
-
-            # V4.3.1 phase guard
-
-            if (
-                self.state["phase"] == "READ"
-                and tool == "search_code_index"
-            ):
-                tool = "read_file_chunk"
-
-
-            if not tool:
-
-                print(
-                    "分析完成"
-                )
-
-                break
-
-            if not self.allow_tool(tool):
-
-                print(
-                    "当前阶段禁止执行:",
-                    tool,
-                    "当前阶段:",
-                    self.state["phase"]
-                )
-
-                continue
-
-            if not self.allow_tool(tool):
-
-                print(
-                    "当前阶段禁止执行:",
-                    tool,
-                    "当前阶段:",
-                    self.state["phase"]
-                )
-
-                self.state["phase"] = "SUMMARY"
-
-                continue
-
-            print(
-                "执行工具:",
-                tool
-            )
-
-
-            print(
-                "参数:",
-                args
-            )
-
-            if (
-                tool == "read_file_chunk"
-                and self.state["read_done"]
-            ):
-
-                print("源码已经读取，跳过重复读取")
-
-                continue
-
-
-            result = self.controller.call(
-                tool,
-                args
-            )
-
-            print("DEBUG tool returned:", type(result))
-            print("DEBUG result length:", len(str(result)))
-            # V4.3.2 reject directory read
-
-            if tool == "read_file_chunk":
-
-                if args.strip() == self.project:
-
-                    print(
-                          "禁止读取项目目录"
-                    )
-
-                    args = (
-                            self.state["target_file"]
-                            + "|1|100"
-                    )
-
-            if tool == "read_file_chunk":
-
-                print(
-                      "源码读取完成，进入分析阶段"
-                )
-
-                self.state["read_done"] = True
-                self.state["phase"] = "ANALYZE"
-
-
-
-            if tool == "analyze_code":
-
-                print()
-                print("========== ANALYZE 完成 ==========")
-
-                self.state["analysis_result"] = result
-
-                print("DEBUG: 保存分析历史")
-
-                self.memory.add_analysis(
-                    self.project,
-                    self.state["target_file"],
-                    result
-                )
-
-                print("DEBUG: 分析历史保存完成")
-
-                self.state["analyze_done"] = True
-                self.state["verify_done"] = False
-
-                print("========== VERIFY 阶段 ==========")
-
-                # V4.5.1:
-                # 先建立独立 VERIFY 状态。
-                # 当前版本暂不增加新的工具调用，
-                # 只验证状态机能够稳定经过 VERIFY。
-                self.state["phase"] = "VERIFY"
-
-                self.state["summary_done"] = False
-                self.state["can_modify"] = False
-
                 analysis = self.state.get(
                     "analysis_result",
                     ""
-                )
-
-                print(
-                    "DEBUG: ANALYZE 原始结果长度 =",
-                    len(analysis)
                 )
 
                 # V4.4 chunked analysis
@@ -1134,6 +1039,172 @@ analyze_code
                 print("========== 任务完成 ==========")
 
                 break
+
+
+            response = self.ask_llm(
+                prompt
+            )
+
+
+            print(response)
+
+
+            tool, args = self.extract_tool(
+                response
+            )
+
+            # V4.3.2 force read after search
+
+            if (
+                self.state["target_file"]
+                and tool == "search_code_index"
+            ):
+
+                print(
+                      "已有目标文件，禁止再次搜索"
+                )
+
+                tool = "read_file_chunk"
+
+                args = (
+                        self.state["target_file"]
+                        + "|1|100"
+                )
+
+            # V4.3.4 force analyze phase
+
+            if (
+                self.state["phase"] == "ANALYZE"
+                and tool != "analyze_code"
+            ):
+
+                print(
+                      "分析阶段强制执行 analyze_code"
+                )
+
+                tool = "analyze_code"
+
+                args = (
+                self.state["target_file"]
+                )
+
+            # V4.3.1 phase guard
+
+            if (
+                self.state["phase"] == "READ"
+                and tool == "search_code_index"
+            ):
+                tool = "read_file_chunk"
+
+
+            if not tool:
+
+                print(
+                    "分析完成"
+                )
+
+                break
+
+            if not self.allow_tool(tool):
+
+                print(
+                    "当前阶段禁止执行:",
+                    tool,
+                    "当前阶段:",
+                    self.state["phase"]
+                )
+
+                continue
+
+
+            print(
+                "执行工具:",
+                tool
+            )
+
+
+            print(
+                "参数:",
+                args
+            )
+
+            if (
+                tool == "read_file_chunk"
+                and self.state["read_done"]
+            ):
+
+                print("源码已经读取，跳过重复读取")
+
+                continue
+
+
+            result = self.controller.call(
+                tool,
+                args
+            )
+
+            print("DEBUG tool returned:", type(result))
+            print("DEBUG result length:", len(str(result)))
+            # V4.3.2 reject directory read
+
+            if tool == "read_file_chunk":
+
+                if args.strip() == self.project:
+
+                    print(
+                          "禁止读取项目目录"
+                    )
+
+                    args = (
+                            self.state["target_file"]
+                            + "|1|100"
+                    )
+
+            if tool == "read_file_chunk":
+
+                print(
+                      "源码读取完成，进入分析阶段"
+                )
+
+                self.state["read_done"] = True
+                self.state["phase"] = "ANALYZE"
+
+
+
+            if tool == "analyze_code":
+
+                print()
+                print("========== ANALYZE 完成 ==========")
+
+                self.state["analysis_result"] = result
+
+                print("DEBUG: 保存分析历史")
+
+                self.memory.add_analysis(
+                    self.project,
+                    self.state["target_file"],
+                    result
+                )
+
+                print("DEBUG: 分析历史保存完成")
+
+                self.state["analyze_done"] = True
+                self.state["verify_done"] = False
+
+                print("========== VERIFY 阶段 ==========")
+
+                # V4.5.1:
+                # 先建立独立 VERIFY 状态。
+                # 当前版本暂不增加新的工具调用，
+                # 只验证状态机能够稳定经过 VERIFY。
+                self.state["phase"] = "VERIFY"
+
+                self.state["summary_done"] = False
+
+                # V4.5.5:
+                # ANALYZE 完成后立即停止当前轮。
+                # SUMMARY 生成必须等待下一轮 VERIFY 通过。
+                continue
 
             if tool == "search_code_index":
 
