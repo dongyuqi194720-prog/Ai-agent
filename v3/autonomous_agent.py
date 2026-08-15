@@ -1274,20 +1274,63 @@ analyze_code
 
                                 break
 
-
-                    # V4.6.0 fallback
-                    # 没找到指定文件时，使用搜索第一结果
+                    # V4.6.1 search ranking fallback
 
                     if not found and len(data) > 0:
 
-                        self.state["target_file"] = data[0].get(
-                            "file",
-                            ""
-                        )
+                        keywords = [
+                            "mutex",
+                            "thread",
+                            "queue",
+                            "server",
+                            "scheduler",
+                            "worker"
+                        ]
+
+                        best_file = ""
+                        best_score = -1
+
+
+                        for item in data:
+
+                            file_path = item.get(
+                                "file",
+                                ""
+                            )
+
+                            score = 0
+
+                            lower = file_path.lower()
+
+
+                            for k in keywords:
+
+                                if k in lower:
+                                    score += 10
+
+
+                            if "/server/" in lower:
+                                score += 20
+
+
+                            if "/ggml/src/" in lower:
+                                score += 5
+
+
+                            if score > best_score:
+
+                                best_score = score
+                                best_file = file_path
+
+
+                        self.state["target_file"] = best_file
+
 
                         print(
-                            "fallback target:",
-                            self.state["target_file"]
+                            "scored fallback target:",
+                            best_file,
+                            "score:",
+                            best_score
                         )
 
 
