@@ -1176,17 +1176,52 @@ analyze_code
                 print()
                 print("========== ANALYZE 完成 ==========")
 
-                self.state["analysis_result"] = result
+                print("DEBUG: 开始 LLM 分析")
 
-                print("DEBUG: 保存分析历史")
+                analysis_prompt = f"""
+                请分析下面源码。
 
-                self.memory.add_analysis(
-                    self.project,
-                    self.state["target_file"],
-                    result
+                源码:
+                {result}
+
+                要求输出：
+
+                1. 文件职责
+                2. 核心数据结构
+                3. 关键函数流程
+                4. 并发、队列、状态管理机制
+                5. 潜在风险
+
+                如果发现问题，必须严格使用：
+
+                证据:
+                xxx
+
+                结论:
+                xxx
+
+                如果没有明确问题，请输出：
+
+                未发现明确问题
+
+                不要重复源码。
+                不要猜测不存在的代码。
+                使用中文简短回答。
+                """
+
+
+                analysis_result = self.ask_llm(
+                analysis_prompt
                 )
 
-                print("DEBUG: 分析历史保存完成")
+
+                print(
+                "DEBUG: LLM分析完成，长度=",
+                len(str(analysis_result))
+                )
+
+
+                self.state["analysis_result"] = analysis_result
 
                 self.state["analyze_done"] = True
                 self.state["verify_done"] = False
