@@ -642,76 +642,98 @@ analyze_code
                     repr(analysis_text[:1000])
                 )
 
-                evidence_count = len(
-                    re.findall(
-                        r"(证据|依据|因为|导致|因此)",
-                        analysis_text
-                    )
-                )
-
-                conclusion_count = len(
-                    re.findall(
-                        r"(结论|问题|错误|冲突|异常|失败|未定义行为|死锁)",
-                        analysis_text
-                    )
-                )
-
-                # V4.5.5:
-                # 如果分析结果明确表示“未发现明确问题”，
-                # 则该结果本身属于合法的 VERIFY 结果。
+                # V4.9.4:
+                # VERIFY 不再只依赖关键词判断“是否存在证据”。
                 #
-                # 只有当分析结果明确提出问题时，
-                # 才要求同时存在证据与结论关联。
+                # 如果 ANALYZE 明确提出问题，
+                # 必须提供结构化源码证据：
+                #
+                # 证据:
+                # 文件: ...
+                # 行号: ...
+                # 代码: ...
+                # 说明: ...
+                #
+                # 结论:
+                # ...
+                #
+                # 如果无法提供完整证据，则 VERIFY 失败，
+                # 回退 ANALYZE。
+
                 no_clear_problem = (
                     "未发现明确问题" in analysis_text
                 )
 
-                evidence_tokens = (
-                    "证据",
-                    "依据",
-                    "因为",
-                    "导致",
-                    "因此",
+                evidence_header = bool(
+                    re.search(
+                        r"证据\s*[:：]",
+                        analysis_text
+                    )
                 )
 
-                conclusion_tokens = (
-                    "结论",
-                    "问题",
-                    "错误",
-                    "冲突",
-                    "异常",
-                    "失败",
-                    "未定义行为",
-                    "死锁",
-                )
-
-                fragments = re.split(
-                    r"[。！？!?.\n]+",
+                file_match = re.search(
+                    r"文件\s*[:：]\s*(.+)",
                     analysis_text
                 )
 
-                evidence_conclusion_linked = False
+                line_match = re.search(
+                    r"行号\s*[:：]\s*(.+)",
+                    analysis_text
+                )
 
-                for fragment in fragments:
+                code_match = re.search(
+                    r"代码\s*[:：]\s*(.+)",
+                    analysis_text
+                )
 
-                    fragment = fragment.strip()
+                explanation_match = re.search(
+                    r"说明\s*[:：]\s*(.+)",
+                    analysis_text
+                )
 
-                    if not fragment:
-                        continue
+                conclusion_match = re.search(
+                    r"结论\s*[:：]\s*(.+)",
+                    analysis_text
+                )
 
-                    has_evidence = any(
-                        token in fragment
-                        for token in evidence_tokens
-                    )
+                evidence_file = (
+                    file_match.group(1).strip()
+                    if file_match
+                    else ""
+                )
 
-                    has_conclusion = any(
-                        token in fragment
-                        for token in conclusion_tokens
-                    )
+                evidence_line = (
+                    line_match.group(1).strip()
+                    if line_match
+                    else ""
+                )
 
-                    if has_evidence and has_conclusion:
-                        evidence_conclusion_linked = True
-                        break
+                evidence_code = (
+                    code_match.group(1).strip()
+                    if code_match
+                    else ""
+                )
+
+                evidence_explanation = (
+                    explanation_match.group(1).strip()
+                    if explanation_match
+                    else ""
+                )
+
+                conclusion_text = (
+                    conclusion_match.group(1).strip()
+                    if conclusion_match
+                    else ""
+                )
+
+                structured_evidence = (
+                    evidence_header
+                    and bool(evidence_file)
+                    and bool(evidence_line)
+                    and bool(evidence_code)
+                    and bool(evidence_explanation)
+                    and bool(conclusion_text)
+                )
 
                 if no_clear_problem:
 
@@ -725,49 +747,42 @@ analyze_code
                     verify_ok = (
                         self.state["analyze_done"]
                         and bool(analysis_text)
-                        and evidence_count > 0
-                        and conclusion_count > 0
-                        and evidence_conclusion_linked
+                        and structured_evidence
                     )
 
                 print(
-                    "VERIFY: evidence_count =",
-                    evidence_count
+                    "VERIFY: structured_evidence =",
+                    structured_evidence
                 )
 
                 print(
-                    "VERIFY: conclusion_count =",
-                    conclusion_count
+                    "VERIFY: evidence_file =",
+                    bool(evidence_file)
                 )
 
                 print(
-                    "VERIFY: evidence_conclusion_linked =",
-                    evidence_conclusion_linked
+                    "VERIFY: evidence_line =",
+                    bool(evidence_line)
+                )
+
+                print(
+                    "VERIFY: evidence_code =",
+                    bool(evidence_code)
+                )
+
+                print(
+                    "VERIFY: evidence_explanation =",
+                    bool(evidence_explanation)
+                )
+
+                print(
+                    "VERIFY: conclusion =",
+                    bool(conclusion_text)
                 )
 
                 print(
                     "VERIFY: no_clear_problem =",
                     no_clear_problem
-                )
-
-                print(
-                    "VERIFY: conclusion_count =",
-                    conclusion_count
-                )
-
-                print(
-                    "VERIFY: evidence_conclusion_linked =",
-                    evidence_conclusion_linked
-                )
-
-                print(
-                    "VERIFY: evidence_count =",
-                    evidence_count
-                )
-
-                print(
-                    "VERIFY: conclusion_count =",
-                    conclusion_count
                 )
 
                 if verify_ok:
@@ -1378,16 +1393,27 @@ analyze_code
 4. mutex / lock / 线程并发机制
 5. 是否存在明确的并发风险
 
-如果发现明确问题，严格输出：
+如果发现明确问题，必须严格按照下面格式输出：
 
 证据:
-xxx
+文件: <源码中的完整文件路径>
+行号: <源码中的实际行号>
+代码: <从提供源码中直接引用的代码>
+说明: <说明这段代码为什么构成并发风险>
 
 结论:
-xxx
+<明确说明存在什么问题，以及为什么可能形成死锁或其他并发风险>
 
 如果没有明确问题：
 未发现明确问题
+
+重要要求：
+1. 证据中的文件必须来自上面提供的源码。
+2. 行号必须来自源码前面的实际行号。
+3. 代码必须直接来自提供的源码，禁止编造。
+4. 如果无法从提供的源码确认具体证据，必须输出：
+未发现明确问题
+5. 不允许仅凭“可能”“推测”“看起来”等模糊描述认定存在问题。
 
 只根据给出的源码判断，不要猜测未提供的代码。
 不要重复源码。
