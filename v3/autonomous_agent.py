@@ -22,6 +22,10 @@ class AutonomousAgent:
 
             "target_file": None,
 
+            # V4.9.1: 保存 SEARCH 阶段发现的多个候选文件。
+            # target_file 继续保留，兼容 V4.8.1 当前单文件流程。
+            "target_files": [],
+
             "read_done": False,
 
             "analysis_context": [], 
@@ -1358,6 +1362,8 @@ xxx
                     best_file = ""
                     best_score = -1
 
+                    ranked_files = []
+
 
                     for item in data:
 
@@ -1416,11 +1422,34 @@ xxx
                                 score -= 50
 
 
+                        ranked_files.append(
+                            (score, file_path)
+                        )
+
+
                         if score > best_score:
 
                             best_score = score
                             best_file = file_path
 
+
+                    # V4.9.1:
+                    # 保存 SEARCH 阶段排名最高的 Top 5 候选文件。
+                    ranked_files.sort(
+                        key=lambda x: x[0],
+                        reverse=True
+                    )
+
+                    self.state["target_files"] = [
+                        file_path
+                        for score, file_path
+                        in ranked_files[:5]
+                    ]
+
+                    print(
+                        "V4.9.1 candidate files:",
+                        self.state["target_files"]
+                    )
 
 
                     self.state["target_file"] = best_file
