@@ -770,6 +770,23 @@ analyze_code
                     )
 
                     self.state["verify_done"] = True
+
+                    # V4.8.0:
+                    # VERIFY 已经确认分析结果是否包含明确问题。
+                    # 这里将 VERIFY 结果转换为修改许可状态。
+                    #
+                    # 未发现明确问题：
+                    #   不允许进入后续修改流程。
+                    #
+                    # 已确认明确问题：
+                    #   允许后续版本生成修改计划。
+                    self.state["can_modify"] = not no_clear_problem
+
+                    print(
+                        "MODIFY DECISION: can_modify =",
+                        self.state["can_modify"]
+                    )
+
                     self.state["phase"] = "SUMMARY"
 
                 else:
@@ -783,6 +800,10 @@ analyze_code
                     )
 
                     self.state["verify_done"] = False
+
+                    # VERIFY 未通过时绝对禁止修改。
+                    self.state["can_modify"] = False
+
                     self.state["analyze_done"] = False
                     self.state["phase"] = "ANALYZE"
 
