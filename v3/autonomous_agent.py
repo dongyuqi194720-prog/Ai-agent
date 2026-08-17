@@ -41,7 +41,12 @@ class AutonomousAgent:
 
             "can_modify": False,
 
-            "tool_failures": 0
+            "tool_failures": 0,
+
+            # V4.9.7:
+            # VERIFY 证据不足时允许重新 SEARCH。
+            # 防止证据不足导致无限循环。
+            "verify_retry_count": 0
         }
          
 
@@ -817,9 +822,16 @@ analyze_code
                         "VERIFY: 分析结果状态检查失败"
                     )
 
-                    print(
-                        "VERIFY: 回退 ANALYZE"
-                    )
+                    # V4.9.7:
+                    # VERIFY 失败首先判断是否属于“证据不足”。
+                    #
+                    # 如果当前分析没有形成明确问题证据，
+                    # 不再原地 ANALYZE。
+                    #
+                    # 重新进入 SEARCH，让 Agent 获取新的候选文件，
+                    # 再经过 READ -> ANALYZE -> VERIFY。
+                    #
+                    # 最多重新调查 2 次，防止状态机无限循环。
 
                     self.state["verify_done"] = False
 
@@ -827,7 +839,50 @@ analyze_code
                     self.state["can_modify"] = False
 
                     self.state["analyze_done"] = False
-                    self.state["phase"] = "ANALYZE"
+
+                    retry_count = self.state.get(
+                        "verify_retry_count",
+                        0
+                    )
+
+                    if retry_count < 2:
+
+                        retry_count += 1
+
+                        self.state["verify_retry_count"] = (
+                            retry_count
+                        )
+
+                        print(
+                            "V4.9.7: VERIFY 证据不足，重新 SEARCH"
+                        )
+
+                        print(
+                            "V4.9.7: 调查轮次 =",
+                            retry_count,
+                            "/ 2"
+                        )
+
+                        self.state["search_done"] = False
+                        self.state["target_file"] = None
+                        self.state["target_files"] = []
+                        self.state["read_index"] = 0
+                        self.state["read_done"] = False
+                        self.state["analysis_context"] = []
+
+                        self.state["phase"] = "SEARCH"
+
+                    else:
+
+                        print(
+                            "V4.9.7: 已达到最大重新调查次数"
+                        )
+
+                        print(
+                            "V4.9.7: 停止继续 SEARCH，进入 SUMMARY"
+                        )
+
+                        self.state["phase"] = "SUMMARY"
 
                 continue
 
