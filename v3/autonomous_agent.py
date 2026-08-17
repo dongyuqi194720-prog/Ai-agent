@@ -26,6 +26,9 @@ class AutonomousAgent:
             # target_file 继续保留，兼容 V4.8.1 当前单文件流程。
             "target_files": [],
 
+            # V4.9.2: 当前正在读取的候选文件索引。
+            "read_index": 0,
+
             "read_done": False,
 
             "analysis_context": [], 
@@ -1151,27 +1154,44 @@ analyze_code
                 self.state["target_file"]
                 )
 
-            # V4.7.3 READ 阶段强制使用真实 target_file
+            # V4.9.2 READ 阶段：
+            # 按 SEARCH 阶段产生的 Top 5 候选文件依次读取。
             #
-            # 一旦 SEARCH 已经确定 target_file，
-            # READ 阶段禁止 LLM 自己决定读取路径。
-            # 防止模型把 project 根目录、错误文件或其他路径
-            # 作为 read_file_chunk 参数。
+            # LLM 不允许决定 READ 路径。
+            # 当前文件由 read_index + target_files 决定。
             if (
                 self.state["phase"] == "READ"
-                and self.state["target_file"]
+                and self.state["target_files"]
             ):
 
-                target = self.state["target_file"]
+                read_index = self.state["read_index"]
 
-                print(
-                    "V4.7.3 强制 READ target:",
-                    target
-                )
+                if read_index < len(self.state["target_files"]):
 
-                tool = "read_file_chunk"
+                    target = self.state["target_files"][read_index]
 
-                args = f"{target}|1|100"
+                    print(
+                        "V4.9.2 READ candidate:",
+                        read_index + 1,
+                        "/",
+                        len(self.state["target_files"]),
+                        target
+                    )
+
+                    tool = "read_file_chunk"
+
+                    args = f"{target}|1|100"
+
+                else:
+
+                    print(
+                        "V4.9.2 所有候选文件读取完成"
+                    )
+
+                    self.state["read_done"] = True
+                    self.state["phase"] = "ANALYZE"
+
+                    continue
 
             if (
                 self.state["phase"] == "READ"
@@ -1211,14 +1231,9 @@ analyze_code
                 args
             )
 
-            if (
-                tool == "read_file_chunk"
-                and self.state["read_done"]
-            ):
-
-                print("源码已经读取，跳过重复读取")
-
-                continue
+            # V4.9.2：
+            # READ 阶段允许连续读取多个候选文件。
+            # 不再使用旧版 read_done 阻止后续 READ。
 
 
             result = self.controller.call(
@@ -1245,12 +1260,45 @@ analyze_code
 
             if tool == "read_file_chunk":
 
-                print(
-                      "源码读取完成，进入分析阶段"
+                # V4.9.2：
+                # 保存当前候选文件源码，供后续多文件分析使用。
+                self.state["analysis_context"].append(
+                    {
+                        "file": self.state["target_files"][
+                            self.state["read_index"]
+                        ],
+                        "source": str(result)
+                    }
                 )
 
-                self.state["read_done"] = True
-                self.state["phase"] = "ANALYZE"
+                print(
+                    "V4.9.2 READ 完成:",
+                    self.state["target_files"][
+                        self.state["read_index"]
+                    ]
+                )
+
+                self.state["read_index"] += 1
+
+                if (
+                    self.state["read_index"]
+                    < len(self.state["target_files"])
+                ):
+
+                    print(
+                        "V4.9.2 继续读取下一个候选文件"
+                    )
+
+                    self.state["phase"] = "READ"
+
+                else:
+
+                    print(
+                        "V4.9.2 所有候选文件读取完成，进入分析阶段"
+                    )
+
+                    self.state["read_done"] = True
+                    self.state["phase"] = "ANALYZE"
 
 
 
@@ -1265,7 +1313,35 @@ analyze_code
                 # 限制 ANALYZE 输入规模，避免大型源码导致本地模型长时间推理。
                 MAX_ANALYSIS_CHARS = 4000
 
-                analysis_source = str(result)
+                # V4.9.2 step3:
+                # ANALYZE 不再只分析最后一次 READ 的 result。
+                # 将 SEARCH 阶段选出的多个候选文件统一送入分析上下文。
+                #
+                # 每个文件最多保留 1000 字符，
+                # 防止多个大型源码文件导致本地模型推理时间过长。
+
+                analysis_parts = []
+
+                for item in self.state["analysis_context"]:
+
+                    file_path = item.get("file", "")
+                    source = str(item.get("source", ""))
+
+                    source = source[:1000]
+
+                    analysis_parts.append(
+                        f"===== 文件: {file_path} =====\n"
+                        + source
+                    )
+
+                analysis_source = "\n\n".join(
+                    analysis_parts
+                )
+
+                print(
+                    "V4.9.2 ANALYZE 文件数量 =",
+                    len(analysis_parts)
+                )
 
                 print(
                     "DEBUG: ANALYZE 原始输入长度 =",
@@ -1445,6 +1521,12 @@ xxx
                         for score, file_path
                         in ranked_files[:5]
                     ]
+
+                    # V4.9.2：
+                    # 每次新的 SEARCH 都从第一个候选文件重新读取。
+                    self.state["read_index"] = 0
+                    self.state["analysis_context"] = []
+                    self.state["read_done"] = False
 
                     print(
                         "V4.9.1 candidate files:",
