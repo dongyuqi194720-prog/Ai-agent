@@ -1309,9 +1309,13 @@ analyze_code
 
                 print("DEBUG: 开始 LLM 分析")
 
-                # V4.7.1
-                # 限制 ANALYZE 输入规模，避免大型源码导致本地模型长时间推理。
-                MAX_ANALYSIS_CHARS = 4000
+                # V4.9.3 step2:
+                # 多文件分析上下文最多包含 5 个候选文件，
+                # 每个文件最多 1000 字符。
+                #
+                # 总长度上限提高到 6000，
+                # 避免 V4.7.1 的 4000 字符限制截断多文件上下文。
+                MAX_ANALYSIS_CHARS = 6000
 
                 # V4.9.2 step3:
                 # ANALYZE 不再只分析最后一次 READ 的 result。
@@ -1558,24 +1562,14 @@ xxx
                     )
 
 
-            if tool == "read_file_chunk":
-
-                parts = args.split("|")
-
-                if (
-                    self.state["target_file"]
-                    and parts[0] != self.state["target_file"]
-                ):
-
-                    print(
-                        "修正读取目标:",
-                        parts[0],
-                        "->",
-                        self.state["target_file"]
-                    )
-                    parts[0] = self.state["target_file"]
-
-                    args = "|".join(parts)
+            # V4.9.3:
+            # 移除 V4.7.3 的单文件 target_file 强制覆盖逻辑。
+            #
+            # V4.9.2 起，READ 路径唯一由：
+            #     target_files[read_index]
+            # 决定。
+            #
+            # 不允许旧版 target_file 保护逻辑覆盖当前候选文件。
 
             if tool == "read_file_chunk":
 
