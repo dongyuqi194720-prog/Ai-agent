@@ -1330,7 +1330,7 @@ analyze_code
                 #
                 # 总长度上限提高到 6000，
                 # 避免 V4.7.1 的 4000 字符限制截断多文件上下文。
-                MAX_ANALYSIS_CHARS = 6000
+                MAX_ANALYSIS_CHARS = 10000
 
                 # V4.9.2 step3:
                 # ANALYZE 不再只分析最后一次 READ 的 result。
@@ -1346,7 +1346,7 @@ analyze_code
                     file_path = item.get("file", "")
                     source = str(item.get("source", ""))
 
-                    source = source[:1000]
+                    source = source[:2000]
 
                     analysis_parts.append(
                         f"===== 文件: {file_path} =====\n"
