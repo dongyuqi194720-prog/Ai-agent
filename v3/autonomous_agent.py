@@ -1195,7 +1195,7 @@ analyze_code
 
                     tool = "read_file_chunk"
 
-                    args = f"{target}|1|100"
+                    args = f"{target}|1|200"
 
                 else:
 
