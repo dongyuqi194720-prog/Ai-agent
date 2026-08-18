@@ -41,6 +41,13 @@ class AutonomousAgent:
 
             "can_modify": False,
 
+            # V4.9.8:
+            # VERIFY 确认存在明确问题后，
+            # 先生成修改计划，再进入后续流程。
+            "modify_plan_done": False,
+
+            "modify_plan": "",
+
             "tool_failures": 0,
 
             # V4.9.7:
@@ -814,7 +821,20 @@ analyze_code
                         self.state["can_modify"]
                     )
 
-                    self.state["phase"] = "SUMMARY"
+                    if self.state["can_modify"]:
+
+                        print(
+                            "V4.9.8: 进入 MODIFY_PLAN"
+                        )
+
+                        self.state["modify_plan_done"] = False
+                        self.state["modify_plan"] = ""
+
+                        self.state["phase"] = "MODIFY_PLAN"
+
+                    else:
+
+                        self.state["phase"] = "SUMMARY"
 
                 else:
 
@@ -883,6 +903,74 @@ analyze_code
                         )
 
                         self.state["phase"] = "SUMMARY"
+
+                continue
+
+
+            if (
+                self.state["phase"] == "MODIFY_PLAN"
+                and self.state["analyze_done"]
+                and self.state["verify_done"]
+                and self.state["can_modify"]
+            ):
+
+                print(
+                    "========== MODIFY PLAN =========="
+                )
+
+                analysis = self.state.get(
+                    "analysis_result",
+                    ""
+                )
+
+                modify_prompt = f"""
+根据下面已经通过 VERIFY 的代码分析结果，
+生成一个结构化修改计划。
+
+不要修改代码。
+不要调用任何写文件工具。
+
+只输出：
+
+文件:
+函数:
+问题:
+证据:
+修改方案:
+测试方案:
+风险:
+
+要求：
+1. 必须严格基于已经提供的分析结果。
+2. 不允许猜测不存在的代码。
+3. 如果证据不足，明确说明无法生成可靠修改计划。
+4. 修改方案必须说明具体准备修改什么。
+5. 测试方案必须说明修改后如何验证。
+6. 当前阶段只生成计划，不执行修改。
+
+已经验证的分析结果：
+{analysis}
+"""
+
+                plan = self.ask_llm(
+                    modify_prompt
+                )
+
+                self.state["modify_plan"] = str(
+                    plan
+                )
+
+                self.state["modify_plan_done"] = True
+
+                print(
+                    "V4.9.8 MODIFY PLAN 完成"
+                )
+
+                print(
+                    self.state["modify_plan"]
+                )
+
+                self.state["phase"] = "SUMMARY"
 
                 continue
 
