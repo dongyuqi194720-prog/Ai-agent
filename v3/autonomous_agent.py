@@ -88,51 +88,131 @@ class AutonomousAgent:
     ):
 
         import time
+        import threading
+        import queue
+
+        # V4.10.0:
+        # LLM 调用不能无限阻塞 Agent。
+        #
+        # 注意：
+        # 这里使用 daemon thread 执行 invoke。
+        # 超时后主 Agent 可以继续恢复，而不会被
+        # 一个永久阻塞的本地模型调用锁死。
+        #
+        # 当前先只实现“硬超时”。
+        # 自动重试 / 状态恢复放到后续版本，
+        # 避免一次修改同时改变状态机行为。
+
+        LLM_TIMEOUT = 120
 
         start_time = time.time()
 
         print(
-            "V4.9.9 LLM CALL START:",
+            "V4.10.0 LLM CALL START:",
             "input_chars =",
-            len(str(prompt))
+            len(str(prompt)),
+            "timeout =",
+            LLM_TIMEOUT,
+            "seconds"
         )
+
+        result_queue = queue.Queue(
+            maxsize=1
+        )
+
+        def worker():
+
+            try:
+
+                response = self.llm.invoke(
+                    prompt
+                )
+
+                result_queue.put(
+                    (
+                        "success",
+                        response
+                    )
+                )
+
+            except Exception as e:
+
+                try:
+
+                    result_queue.put(
+                        (
+                            "error",
+                            e
+                        )
+                    )
+
+                except Exception:
+                    pass
+
+        worker_thread = threading.Thread(
+            target=worker,
+            daemon=True
+        )
+
+        worker_thread.start()
 
         try:
 
-            response = self.llm.invoke(
-                prompt
+            result_type, result = (
+                result_queue.get(
+                    timeout=LLM_TIMEOUT
+                )
             )
 
-        except Exception as e:
+        except queue.Empty:
 
             elapsed = time.time() - start_time
 
             print(
-                "V4.9.9 LLM CALL ERROR:",
-                type(e).__name__,
+                "V4.10.0 LLM CALL TIMEOUT:",
                 "elapsed =",
                 round(elapsed, 2),
                 "seconds"
             )
 
-            raise
+            print(
+                "V4.10.0 LLM CALL TIMEOUT:",
+                "Agent 不再无限等待模型"
+            )
+
+            raise TimeoutError(
+                "LLM call timed out after "
+                f"{LLM_TIMEOUT} seconds"
+            )
 
         elapsed = time.time() - start_time
 
+        if result_type == "error":
+
+            print(
+                "V4.10.0 LLM CALL ERROR:",
+                type(result).__name__,
+                "elapsed =",
+                round(elapsed, 2),
+                "seconds"
+            )
+
+            raise result
+
         print(
-            "V4.9.9 LLM CALL END:",
+            "V4.10.0 LLM CALL END:",
             "elapsed =",
             round(elapsed, 2),
             "seconds"
         )
 
         if hasattr(
-            response,
+            result,
             "content"
         ):
-            return response.content
+            return result.content
 
-        return str(response)
+        return str(result)
 
 
 
