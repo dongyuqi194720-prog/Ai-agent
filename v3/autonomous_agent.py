@@ -48,6 +48,15 @@ class AutonomousAgent:
 
             "modify_plan": "",
 
+            # V4.9.9:
+            # MODIFY_PLAN 生成后必须经过独立二次验证。
+            # 未通过 PLAN_VERIFY 时禁止进入真正修改阶段。
+            "plan_verify_done": False,
+
+            "plan_verify_passed": False,
+
+            "plan_verify_result": "",
+
             "tool_failures": 0,
 
             # V4.9.7:
@@ -78,8 +87,43 @@ class AutonomousAgent:
         prompt
     ):
 
-        response = self.llm.invoke(
-            prompt
+        import time
+
+        start_time = time.time()
+
+        print(
+            "V4.9.9 LLM CALL START:",
+            "input_chars =",
+            len(str(prompt))
+        )
+
+        try:
+
+            response = self.llm.invoke(
+                prompt
+            )
+
+        except Exception as e:
+
+            elapsed = time.time() - start_time
+
+            print(
+                "V4.9.9 LLM CALL ERROR:",
+                type(e).__name__,
+                "elapsed =",
+                round(elapsed, 2),
+                "seconds"
+            )
+
+            raise
+
+        elapsed = time.time() - start_time
+
+        print(
+            "V4.9.9 LLM CALL END:",
+            "elapsed =",
+            round(elapsed, 2),
+            "seconds"
         )
 
         if hasattr(
@@ -830,6 +874,10 @@ analyze_code
                         self.state["modify_plan_done"] = False
                         self.state["modify_plan"] = ""
 
+                        self.state["plan_verify_done"] = False
+                        self.state["plan_verify_passed"] = False
+                        self.state["plan_verify_result"] = ""
+
                         self.state["phase"] = "MODIFY_PLAN"
 
                     else:
@@ -970,7 +1018,152 @@ analyze_code
                     self.state["modify_plan"]
                 )
 
-                self.state["phase"] = "SUMMARY"
+                print(
+                    "V4.9.9: MODIFY_PLAN 完成，进入 PLAN_VERIFY"
+                )
+
+                self.state["phase"] = "PLAN_VERIFY"
+
+                continue
+
+
+            if (
+                self.state["phase"] == "PLAN_VERIFY"
+                and self.state["analyze_done"]
+                and self.state["verify_done"]
+                and self.state["can_modify"]
+                and self.state["modify_plan_done"]
+            ):
+
+                print(
+                    "========== PLAN VERIFY =========="
+                )
+
+                analysis = str(
+                    self.state.get(
+                        "analysis_result",
+                        ""
+                    )
+                )
+
+                plan = str(
+                    self.state.get(
+                        "modify_plan",
+                        ""
+                    )
+                )
+
+                plan_verify_prompt = f"""
+你现在是独立的代码修改方案审查者。
+
+不要修改代码。
+不要调用任何工具。
+不要假设没有提供的源码。
+
+请独立判断下面的“问题分析”和“修改计划”是否成立。
+
+===== 已验证的问题分析 =====
+{analysis}
+
+===== 修改计划 =====
+{plan}
+
+重点检查：
+
+1. 问题是否真的由提供的代码证据证明。
+2. 修改计划是否真正解决该问题。
+3. 修改是否可能破坏 mutex / lock / condition_variable / thread / atomic 的正确同步关系。
+4. 修改是否可能把原本受锁保护的数据访问变成无锁访问。
+5. 修改是否可能引入新的数据竞争。
+6. 修改是否可能破坏条件变量通知与等待关系。
+7. 修改是否可能改变原有执行顺序并产生新的并发问题。
+8. 如果当前证据不足，必须拒绝修改。
+9. 如果问题本身不成立，也必须拒绝修改。
+
+特别注意：
+
+“代码在 mutex 内执行”本身不能证明存在数据竞争。
+如果 mutex 正是在保护该共享数据，那么持锁访问通常是正确行为。
+不能仅凭“持锁期间调用 push_back / push_front / erase / update”
+就认定存在并发问题。
+
+只输出：
+
+PLAN_VERIFY:
+PASS 或 FAIL
+
+理由:
+<简短说明>
+
+如果 FAIL：
+必须明确指出：
+1. 问题分析哪里不成立；
+2. 修改方案哪里存在风险。
+
+如果 PASS：
+必须说明为什么现有证据足以支持该修改。
+
+禁止使用“可能”“看起来”“推测”等模糊理由作为 PASS 的依据。
+"""
+
+                plan_verify_result = self.ask_llm(
+                    plan_verify_prompt
+                )
+
+                plan_verify_result = str(
+                    plan_verify_result
+                )
+
+                self.state["plan_verify_result"] = (
+                    plan_verify_result
+                )
+
+                upper_result = (
+                    plan_verify_result.upper()
+                )
+
+                plan_passed = (
+                    "PLAN_VERIFY:" in upper_result
+                    and "PASS" in upper_result
+                    and "FAIL" not in upper_result
+                )
+
+                self.state["plan_verify_done"] = True
+                self.state["plan_verify_passed"] = (
+                    plan_passed
+                )
+
+                print(
+                    "PLAN_VERIFY result =",
+                    plan_verify_result
+                )
+
+                print(
+                    "PLAN_VERIFY passed =",
+                    plan_passed
+                )
+
+                if plan_passed:
+
+                    print(
+                        "V4.9.9: 修改方案二次验证通过"
+                    )
+
+                    self.state["phase"] = "SUMMARY"
+
+                else:
+
+                    print(
+                        "V4.9.9: 修改方案二次验证失败"
+                    )
+
+                    print(
+                        "V4.9.9: 禁止进入修改阶段"
+                    )
+
+                    self.state["can_modify"] = False
+
+                    self.state["phase"] = "SUMMARY"
 
                 continue
 
