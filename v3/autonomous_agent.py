@@ -103,7 +103,7 @@ class AutonomousAgent:
         # 自动重试 / 状态恢复放到后续版本，
         # 避免一次修改同时改变状态机行为。
 
-        LLM_TIMEOUT = 120
+        LLM_TIMEOUT = 600
 
         start_time = time.time()
 
