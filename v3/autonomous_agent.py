@@ -735,6 +735,127 @@ analyze_code
             )
 
 
+            # V4.10.4:
+            # READ 阶段的下一份文件已经由状态机确定。
+            #
+            # target_files[read_index] 是 SEARCH 阶段产生的候选文件列表，
+            # 因此这里不再让 LLM 决定下一步是否读取文件。
+            #
+            # 这样可以避免：
+            #
+            # READ
+            #   ↓
+            # LLM
+            #   ↓
+            # Python 强制 read_file_chunk
+            #
+            # 对 3B 模型造成不必要的额外推理。
+            #
+            # LLM 只在真正需要分析源码时参与。
+
+            if (
+                self.state["phase"] == "READ"
+                and self.state["target_files"]
+                and self.state["read_index"]
+                < len(self.state["target_files"])
+            ):
+
+                read_index = self.state["read_index"]
+
+                target = self.state["target_files"][read_index]
+
+                print()
+                print(
+                    "========== V4.10.4 DIRECT READ =========="
+                )
+
+                print(
+                    "读取:",
+                    read_index + 1,
+                    "/",
+                    len(self.state["target_files"])
+                )
+
+                print(
+                    "文件:",
+                    target
+                )
+
+                read_args = f"{target}|1|200"
+
+                print(
+                    "执行工具:",
+                    "read_file_chunk"
+                )
+
+                print(
+                    "参数:",
+                    read_args
+                )
+
+                result = self.controller.call(
+                    "read_file_chunk",
+                    read_args
+                )
+
+                print(
+                    "DEBUG tool returned:",
+                    type(result)
+                )
+
+                print(
+                    "DEBUG result length:",
+                    len(str(result))
+                )
+
+                source = str(result)
+
+                self.state["analysis_context"].append(
+                    {
+                        "file": target,
+                        "source": source
+                    }
+                )
+
+                print(
+                    "V4.10.4 READ 完成:",
+                    target
+                )
+
+                self.state["read_index"] += 1
+
+                if (
+                    self.state["read_index"]
+                    < len(self.state["target_files"])
+                ):
+
+                    print(
+                        "V4.10.4 继续直接读取下一个候选文件"
+                    )
+
+                    self.state["phase"] = "READ"
+
+                else:
+
+                    print(
+                        "V4.10.4 所有候选文件读取完成"
+                    )
+
+                    self.state["read_done"] = True
+                    self.state["phase"] = "ANALYZE"
+
+                    print(
+                        "V4.10.4 → ANALYZE"
+                    )
+
+                observation = (
+                    "read_file_chunk 完成："
+                    + target
+                )
+
+                continue
+
+
             if (
                 self.state["phase"] == "VERIFY"
                 and self.state["analyze_done"]
@@ -1755,6 +1876,40 @@ PASS 或 FAIL
                 # 每个文件最多保留 1000 字符，
                 # 防止多个大型源码文件导致本地模型推理时间过长。
 
+                # V4.10.1:
+                # 先提取并发相关源码证据，再限制总上下文长度。
+                #
+                # 不再使用 source[:2000]，
+                # 避免 mutex / lock / wait / notify 位于文件后部
+                # 时被直接截断。
+
+                CONCURRENCY_KEYWORDS = (
+                    "std::mutex",
+                    "std::recursive_mutex",
+                    "std::unique_lock",
+                    "std::lock_guard",
+                    "std::scoped_lock",
+                    "std::condition_variable",
+                    "std::condition_variable_any",
+                    "wait(",
+                    "wait_for(",
+                    "wait_until(",
+                    "notify_one(",
+                    "notify_all(",
+                    "std::thread",
+                    "std::jthread",
+                    "std::atomic",
+                    "atomic_flag",
+                    ".lock(",
+                    ".unlock(",
+                    " lock();",
+                    " unlock();",
+                )
+
+                MAX_ANALYSIS_CHARS = 1800
+                CONTEXT_LINES = 3
+                MAX_FILE_EVIDENCE_CHARS = 1800
+
                 analysis_parts = []
 
                 for item in self.state["analysis_context"]:
@@ -1762,24 +1917,101 @@ PASS 或 FAIL
                     file_path = item.get("file", "")
                     source = str(item.get("source", ""))
 
-                    source = source[:2000]
+                    if not source.strip():
+                        continue
 
-                    analysis_parts.append(
-                        f"===== 文件: {file_path} =====\n"
-                        + source
-                    )
+                    lines = source.splitlines()
+
+                    matched_indexes = []
+
+                    for index, line in enumerate(lines):
+
+                        if any(
+                            keyword in line
+                            for keyword in CONCURRENCY_KEYWORDS
+                        ):
+                            matched_indexes.append(index)
+
+                    if matched_indexes:
+
+                        evidence_indexes = set()
+
+                        for index in matched_indexes:
+
+                            begin = max(
+                                0,
+                                index - CONTEXT_LINES
+                            )
+
+                            end_index = min(
+                                len(lines),
+                                index + CONTEXT_LINES + 1
+                            )
+
+                            for line_index in range(
+                                begin,
+                                end_index
+                            ):
+                                evidence_indexes.add(
+                                    line_index
+                                )
+
+                        ordered_indexes = sorted(
+                            evidence_indexes
+                        )
+
+                        evidence_lines = []
+
+                        for line_index in ordered_indexes:
+
+                            evidence_lines.append(
+                                f"{line_index + 1}: "
+                                + lines[line_index]
+                            )
+
+                        evidence = "\n".join(
+                            evidence_lines
+                        )
+
+                        if len(evidence) > MAX_FILE_EVIDENCE_CHARS:
+
+                            evidence = (
+                                evidence[
+                                    :MAX_FILE_EVIDENCE_CHARS
+                                ]
+                                + "\n[V4.10.1: 该文件并发证据已截断]"
+                            )
+
+                        analysis_parts.append(
+                            f"===== 并发证据文件: {file_path} =====\n"
+                            + evidence
+                        )
+
+                    else:
+
+                        # 没有并发关键词的文件只保留少量摘要。
+                        summary = "\n".join(
+                            lines[:12]
+                        )
+
+                        if summary.strip():
+
+                            analysis_parts.append(
+                                f"===== 非并发核心文件摘要: {file_path} =====\n"
+                                + summary
+                            )
 
                 analysis_source = "\n\n".join(
                     analysis_parts
                 )
 
                 print(
-                    "V4.9.2 ANALYZE 文件数量 =",
+                    "V4.10.1 ANALYZE 文件数量 =",
                     len(analysis_parts)
                 )
 
                 print(
-                    "DEBUG: ANALYZE 原始输入长度 =",
+                    "V4.10.1 并发证据初始长度 =",
                     len(analysis_source)
                 )
 
@@ -1787,13 +2019,13 @@ PASS 或 FAIL
 
                     analysis_source = (
                         analysis_source[:MAX_ANALYSIS_CHARS]
-                        + "\n\n[源码已由 V4.7.1 截断]"
+                        + "\n\n[V4.10.1: 并发证据 context 已达到总长度上限]"
                     )
 
-                    print(
-                        "DEBUG: ANALYZE 输入已压缩为 =",
-                        len(analysis_source)
-                    )
+                print(
+                    "V4.10.1 ANALYZE 最终输入长度 =",
+                    len(analysis_source)
+                )
 
                 analysis_prompt = f"""
 请对下面提供的 C/C++ 源码进行一次严格的并发安全审查。
@@ -2060,12 +2292,26 @@ PASS 或 FAIL
             #
             # 不允许旧版 target_file 保护逻辑覆盖当前候选文件。
 
+            MAX_OBSERVATION_CHARS = 3500
+
             if tool == "read_file_chunk":
 
                 observation = str(result)
+
+                if len(observation) > MAX_OBSERVATION_CHARS:
+                    observation = (
+                        observation[:MAX_OBSERVATION_CHARS]
+                        + "\n\n[工具结果已截断]"
+                    )
 
                 continue
 
 
 
-            observation = str(result) 
+            observation = str(result)
+
+            if len(observation) > MAX_OBSERVATION_CHARS:
+                observation = (
+                    observation[:MAX_OBSERVATION_CHARS]
+                    + "\n\n[工具结果已截断]"
+                )
