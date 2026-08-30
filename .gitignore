@@ -1,3 +1,18 @@
 __pycache__/
 *.pyc
 v3/autonomous_agent_broken.py.backup
+
+# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local backup files
+*.before-*
+*.bad-*
+*.current-broken-*
+
+# Local test environments
+v5_test/

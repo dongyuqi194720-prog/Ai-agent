@@ -1,4 +1,7 @@
 import json
+import os
+
+from ai_agent.codex_bridge import CodexBridge
 
 
 class AutonomousAgent:
@@ -12,6 +15,15 @@ class AutonomousAgent:
     ):
 
         self.llm = llm
+
+        # V5.3:
+        # 保留 V4 原有 self.llm。
+        # Codex 作为独立第二推理通道接入，
+        # 暂不改变 V4 状态机行为。
+        self.codex = CodexBridge(
+            model="gpt-5.6-terra"
+        )
+
         self.router = router
         self.project = project
         self.max_steps = 20
@@ -35,6 +47,13 @@ class AutonomousAgent:
 
             "analyze_done": False,
 
+            # V5.4:
+            # Codex 独立分析结果。
+            # 不覆盖 V4 原有 analysis_result。
+            "codex_analysis": "",
+
+            "codex_analyze_done": False,
+
             "verify_done": False,
 
             "summary_done": False,
@@ -56,6 +75,17 @@ class AutonomousAgent:
             "plan_verify_passed": False,
 
             "plan_verify_result": "",
+
+            # V5.17:
+            # MODIFY 完成后必须进入 VERIFY_RESULT，
+            # 验证修改后的文件是否真实存在、语法是否正确。
+            "verify_result_done": False,
+
+            "verify_result_passed": False,
+
+            "verify_result": "",
+
+            "modified_file": None,
 
             "tool_failures": 0,
 
@@ -80,6 +110,48 @@ class AutonomousAgent:
             self.validator
         )
 
+
+
+    def ask_codex(
+        self,
+        prompt
+    ):
+
+        # V5.3:
+        # 独立 Codex 推理通道。
+        # 不修改 V4 原有 ask_llm()。
+        print(
+            "V5.3 CODEX CALL START:",
+            "input_chars =",
+            len(str(prompt))
+        )
+
+        try:
+
+            result = self.codex.ask(
+                prompt
+            )
+
+        except Exception as e:
+
+            # V5.8:
+            # Codex 是独立第二意见。
+            # Codex 失败时不得阻断 V4 主流程。
+            print(
+                "V5.8 CODEX CALL FAILED:",
+                type(e).__name__,
+                str(e)
+            )
+
+            return ""
+
+        print(
+            "V5.3 CODEX CALL END:",
+            "output_chars =",
+            len(str(result))
+        )
+
+        return result
 
 
     def ask_llm(
@@ -275,6 +347,13 @@ class AutonomousAgent:
             "导致",
             "造成",
             "会发生",
+            "可能导致",
+            "可能造成",
+            "可能发生",
+            "可能存在",
+            "潜在风险",
+            "存在风险",
+            "风险是",
             "会访问",
             "会崩溃",
             "会失败",
@@ -301,6 +380,38 @@ class AutonomousAgent:
             pattern in problem_section
             for pattern in strong_claim_patterns
         )
+
+        # V5.19:
+        # 明确区分“已证明的明确缺陷”和“未经证明的推测性风险”。
+        # “可能导致 / 可能造成 / 可能发生 / 潜在风险”等表述
+        # 即使同时出现“重复获取 / 同一线程”等机制词，
+        # 也不能直接作为明确问题保留。
+        uncertain_claim_patterns = [
+            "可能导致",
+            "可能造成",
+            "可能发生",
+            "可能存在",
+            "潜在风险",
+            "存在风险",
+            "风险是",
+            "可能会",
+            "有可能",
+        ]
+
+        has_uncertain_claim = any(
+            pattern in problem_section
+            for pattern in uncertain_claim_patterns
+        )
+
+        if has_uncertain_claim:
+            print(
+                "DEBUG: SUMMARY Validator 检测到未经证明的推测性结论"
+            )
+
+            return self._replace_summary_problem(
+                response,
+                match
+            )
 
         # --------------------------------------------------
         # V4.4.4:
@@ -337,7 +448,7 @@ class AutonomousAgent:
         evidence_text = (
             evidence_match.group(1).strip()
             if evidence_match
-            else ""
+            else problem_section
         )
 
         conclusion_text = (
@@ -369,8 +480,14 @@ class AutonomousAgent:
             "悬空指针",
             "数据竞争",
             "死锁",
+            "重复加锁",
+            "重复获取",
+            "同一线程",
             "锁顺序",
             "等待自身",
+            "重复加锁",
+            "重复获取同一把锁",
+            "永久阻塞",
             "无限循环",
             "无限递归",
             "重复插入",
@@ -385,12 +502,45 @@ class AutonomousAgent:
             for pattern in mechanism_patterns
         )
 
-        # 如果结论声称存在明确缺陷，但证据中没有发现
-        # 对应的错误机制，则降级。
-        if has_strong_claim and not has_mechanism:
+        # --------------------------------------------------
+        # V5.20:
+        # 主要问题必须同时满足：
+        #
+        # 1. 存在明确缺陷结论；
+        # 2. 证据中存在对应的错误机制。
+        #
+        # 如果只有“重复获取 mutex”“调用 notify_one”
+        # “使用 unique_lock”等行为描述，
+        # 但没有明确说明已经证明的错误结果，
+        # 则不能作为“主要问题”保留。
+        #
+        # 同时保留：
+        #
+        #   证据：
+        #   - 同一线程重复获取同一把非递归 mutex。
+        #   结论：
+        #   - 会发生死锁。
+        #
+        # 因为这里同时具备：
+        #   strong_claim + mechanism
+        # --------------------------------------------------
+
+        if not has_strong_claim:
             print(
-                "DEBUG: SUMMARY Validator 检测到"
-                "“明确问题”缺少证据机制"
+                "DEBUG: V5.20 SUMMARY Validator 检测到"
+                "“只有行为描述，没有明确缺陷结论”"
+            )
+
+            return self._replace_summary_problem(
+                response,
+                match
+            )
+
+        # 明确缺陷结论必须有对应的源码错误机制。
+        if not has_mechanism:
+            print(
+                "DEBUG: V5.20 SUMMARY Validator 检测到"
+                "“明确缺陷结论缺少证据机制”"
             )
 
             return self._replace_summary_problem(
@@ -562,6 +712,13 @@ class AutonomousAgent:
 
             "VERIFY": [],
 
+            # V5.15:
+            # PLAN_VERIFY 通过后进入 MODIFY。
+            # MODIFY 第一阶段只允许执行 write_file。
+            "MODIFY": [
+                "write_file"
+            ],
+
             "SUMMARY": []
 
         }
@@ -611,6 +768,22 @@ READ阶段:
 ANALYZE阶段:
 只能执行:
 - analyze_code
+
+VERIFY阶段:
+验证分析结果是否有充分源码证据。
+没有明确问题则进入SUMMARY。
+发现明确问题则进入PLAN_VERIFY。
+
+PLAN_VERIFY阶段:
+验证修改计划是否有明确问题、明确文件、明确修改内容。
+只有计划验证通过才能进入MODIFY。
+
+MODIFY阶段:
+只能执行:
+- write_file
+
+VERIFY_RESULT阶段:
+验证修改是否成功。
 
 SUMMARY阶段:
 停止调用工具，输出总结。
@@ -665,6 +838,16 @@ search_code_index
 read_file_chunk
  ->
 analyze_code
+ ->
+VERIFY
+ ->
+PLAN_VERIFY
+ ->
+MODIFY
+ ->
+VERIFY_RESULT
+ ->
+SUMMARY
 
 
 4. 搜索必须使用:
@@ -707,6 +890,8 @@ analyze_code
         self,
         question
     ):
+
+        self.state["question"] = question
 
         print()
 
@@ -880,7 +1065,6 @@ analyze_code
                 # 只有“当前实现”或代码行为描述，
                 # 不足以证明存在明确问题。
 
-                import re
 
                 analysis_text = str(analysis).strip()
 
@@ -917,8 +1101,24 @@ analyze_code
                 # 如果无法提供完整证据，则 VERIFY 失败，
                 # 回退 ANALYZE。
 
+                # V5.9:
+                # 只有最终“结论”明确写出“未发现明确问题”，
+                # 才判定为无明确问题。
+                # 不能因为证据/说明正文中出现这句话就误判。
+                conclusion_probe = re.search(
+                    r"结论\s*[:：]\s*(.*?)(?:\n|$)",
+                    analysis_text,
+                    re.S
+                )
+
+                conclusion_probe_text = (
+                    conclusion_probe.group(1).strip()
+                    if conclusion_probe
+                    else ""
+                )
+
                 no_clear_problem = (
-                    "未发现明确问题" in analysis_text
+                    conclusion_probe_text == "未发现明确问题"
                 )
 
                 evidence_header = bool(
@@ -1049,6 +1249,19 @@ analyze_code
                     )
 
                     self.state["verify_done"] = True
+
+                    # V5.14.2:
+                    # 独立记录 VERIFY 是否确认存在明确问题。
+                    # 不能使用 can_modify 判断，因为 PLAN_VERIFY
+                    # 失败后 can_modify 会变成 False，但问题本身仍然存在。
+                    self.state["problem_confirmed"] = (
+                        not no_clear_problem
+                    )
+
+                    print(
+                        "V5.14.2: problem_confirmed =",
+                        self.state["problem_confirmed"]
+                    )
 
                     # V4.8.0:
                     # VERIFY 已经确认分析结果是否包含明确问题。
@@ -1196,6 +1409,15 @@ analyze_code
 4. 修改方案必须说明具体准备修改什么。
 5. 测试方案必须说明修改后如何验证。
 6. 当前阶段只生成计划，不执行修改。
+7. 修改方案必须保持原有程序的基本同步语义，不得为了消除一个问题而引入新的 mutex / lock / unlock 错误。
+8. 对 mutex 问题必须逐一核对 lock 与 unlock 的实际执行顺序。
+9. 如果同一线程连续执行：
+   m.lock();
+   m.lock();
+   那么第二次 m.lock() 在第一次 unlock() 之前执行，属于同一非递归 std::mutex 的重复加锁路径。
+10. 针对同一线程重复加锁，禁止把两个 lock() 简单替换成两个同名的 std::unique_lock 或 std::lock_guard 声明，因为这会产生重复变量定义或错误的锁管理。
+11. 如果使用 RAII，必须明确只创建一个合法的锁对象，并删除多余的重复加锁操作；不得保留会再次获取同一把非递归 mutex 的 lock()。
+12. 修改方案中的示例代码必须是合法、可编译的 C++，并且不能假设分析结果中不存在的函数、变量或线程。
 
 已经验证的分析结果：
 {analysis}
@@ -1281,6 +1503,40 @@ analyze_code
 8. 如果当前证据不足，必须拒绝修改。
 9. 如果问题本身不成立，也必须拒绝修改。
 
+修改方案完整性检查：
+
+1. 修改方案必须同时检查被修改代码与对应的 unlock()。
+2. 如果原代码存在多个 lock() 和 unlock()，
+   不能只替换其中的 lock()，却不说明原有 unlock() 如何处理。
+3. 如果修改方案使用 std::unique_lock 或 std::lock_guard，
+   必须明确说明原有手工 lock() 和 unlock() 哪些删除、
+   哪些保留，以及新的锁对象作用域。
+4. 如果修改后可能同时存在 RAII 自动解锁和原有手工 unlock()，
+   必须判定为 FAIL。
+5. 如果修改方案没有提供足够证据证明修改后的锁获取、
+   锁释放和作用域关系正确，必须判定为 FAIL。
+6. 不能仅因为 unique_lock 或 lock_guard 能自动管理 mutex，
+   就认定修改方案正确。
+7. 对明确的同线程重复加锁问题，
+   PASS 的必要条件是修改方案明确删除重复获取同一 mutex 的操作，
+   并且完整说明对应 unlock() 的处理方式。
+
+同一线程重复加锁的明确判定规则：
+
+如果提供的代码证据明确显示同一执行路径连续执行：
+m.lock();
+m.lock();
+并且第一次 lock() 与第二次 lock() 之间没有对应的 unlock()，
+同时 m 的类型明确为非递归 std::mutex，
+则已经足以证明存在同线程重复加锁的死锁路径。
+
+此时：
+1. 不需要额外证明存在其他线程。
+2. 不得以“没有其他线程信息”为理由否定该问题。
+3. 后面的 unlock() 不能证明安全，因为第二次 lock() 成功返回之前，后续代码无法继续执行。
+4. “lock 次数和 unlock 次数相等”不能否定该死锁，因为执行顺序必须先通过第二次 lock() 才能到达后面的 unlock()。
+5. 对这种明确的同线程自死锁问题，PLAN_VERIFY 应重点判断修改方案是否真正删除了重复获取同一 mutex 的操作。
+
 特别注意：
 
 “代码在 mutex 内执行”本身不能证明存在数据竞争。
@@ -1350,7 +1606,10 @@ PASS 或 FAIL
                         "V4.9.9: 修改方案二次验证通过"
                     )
 
-                    self.state["phase"] = "SUMMARY"
+                    # V5.15:
+                    # PLAN_VERIFY 通过后进入真正修改阶段。
+                    # 当前先建立 MODIFY 状态入口。
+                    self.state["phase"] = "MODIFY"
 
                 else:
 
@@ -1380,6 +1639,65 @@ PASS 或 FAIL
                 analysis = self.state.get(
                     "analysis_result",
                     ""
+                )
+
+                # V5.14.1:
+                # SUMMARY 必须区分：
+                # 1. 没有发现明确问题
+                # 2. 已发现明确问题，但 PLAN_VERIFY 未通过
+                #
+                # 这里只向 SUMMARY 提供状态事实，
+                # 不改变 VERIFY / MODIFY / PLAN_VERIFY 判定。
+                can_modify = self.state.get(
+                    "can_modify",
+                    False
+                )
+
+                problem_confirmed = self.state.get(
+                    "problem_confirmed",
+                    False
+                )
+
+                plan_verify_passed = self.state.get(
+                    "plan_verify_passed",
+                    False
+                )
+
+                verify_result_done = self.state.get(
+                    "verify_result_done",
+                    False
+                )
+
+                verify_result_passed = self.state.get(
+                    "verify_result_passed",
+                    False
+                )
+
+                modification_status = f"""
+本轮修改状态：
+- 已发现明确问题：{"是" if problem_confirmed else "否"}
+- PLAN_VERIFY：{"通过" if plan_verify_passed else "未通过"}
+- 当前允许修改：{"是" if can_modify else "否"}
+- VERIFY_RESULT：{"通过" if verify_result_passed else ("未通过" if verify_result_done else "未执行")}
+
+重要规则：
+“当前允许修改 = 否”不等于“未发现明确问题”。
+
+如果“主要问题”已经被源码证明存在，
+但 PLAN_VERIFY 未通过，导致当前禁止修改，
+“修改方案”必须明确说明：
+“修改计划验证未通过，本轮未执行修改。”
+禁止写成“无需修改”或“未发现需要修改的问题”。
+"""
+
+                print(
+                    "V5.14.2: SUMMARY修改状态：",
+                    "problem_confirmed =",
+                    problem_confirmed,
+                    "can_modify =",
+                    can_modify,
+                    "plan_verify_passed =",
+                    plan_verify_passed
                 )
 
                 # V4.4 chunked analysis
@@ -1471,13 +1789,16 @@ PASS 或 FAIL
 【分块分析结果】
 {combined_analysis}
 
+【本轮修改状态】
+{modification_status}
+
 重要规则：
 1. 原始代码分析结果是最高优先级证据。
-2. 分块分析结果只是辅助理解，不能覆盖原始代码中的事实。
-3. 如果分块分析与原始代码分析结果冲突，以原始代码分析结果为准。
-4. 不得根据常识补充源码中没有出现的行为。
-5. 不得把“可能存在”写成“已经存在”。
-6. 如果无法从代码中确认问题，必须写“未发现明确问题”。
+3. 分块分析结果只是辅助理解，不能覆盖原始代码中的事实。
+4. 如果分块分析与原始代码分析结果冲突，以原始代码分析结果为准。
+5. 不得根据常识补充源码中没有出现的行为。
+6. 不得把“可能存在”写成“已经存在”。
+7. 如果无法从代码中确认问题，必须写“未发现明确问题”。
 
 只回答以下四项：
 
@@ -1659,6 +1980,192 @@ PASS 或 FAIL
                 break
 
 
+            # V5.16:
+            # PLAN_VERIFY 通过后进入 MODIFY。
+            # 只允许根据已经验证的修改计划生成 write_file。
+            if (
+                self.state["phase"] == "MODIFY"
+                and self.state["modify_plan_done"]
+                and self.state["plan_verify_done"]
+                and self.state["plan_verify_passed"]
+                and self.state["can_modify"]
+            ):
+
+                print()
+                print("========== MODIFY ==========")
+
+                modify_plan = str(
+                    self.state.get(
+                        "modify_plan",
+                        ""
+                    )
+                )
+
+                modify_prompt = f"""
+你现在执行已经通过 PLAN_VERIFY 的代码修改计划。
+
+严格要求：
+1. 只根据下面的修改计划执行。
+2. 不得修改计划之外的文件。
+3. 不得猜测不存在的源码。
+4. 只输出一个 write_file 工具调用。
+5. write_file 的 path 必须是修改计划明确指定的文件。
+6. content 必须是修改后的完整文件内容。
+7. 不允许输出解释。
+8. 不允许调用其他工具。
+
+===== 已验证修改计划 =====
+{modify_plan}
+
+输出格式：
+
+<write_file>
+path
+完整修改后的文件内容
+</write_file>
+"""
+
+                response = self.ask_llm(
+                    modify_prompt
+                )
+
+                print(response)
+
+                tool, args = self.extract_tool(
+                    response
+                )
+
+                if tool != "write_file":
+
+                    print(
+                        "V5.16: MODIFY 未生成 write_file，禁止修改"
+                    )
+
+                    self.state["can_modify"] = False
+                    self.state["phase"] = "SUMMARY"
+
+                    continue
+
+                if not self.allow_tool(tool):
+
+                    print(
+                        "V5.16: MODIFY 当前禁止执行:",
+                        tool
+                    )
+
+                    self.state["can_modify"] = False
+                    self.state["phase"] = "SUMMARY"
+
+                    continue
+
+                print(
+                    "V5.16: 执行 write_file"
+                )
+
+                result = self.controller.call(
+                    tool,
+                    args
+                )
+
+                print(
+                    "DEBUG MODIFY result:",
+                    result
+                )
+
+                # V5.17:
+                # MODIFY 成功后必须进入 VERIFY_RESULT，
+                # 不能直接进入 SUMMARY。
+                self.state["modified_file"] = args.split("|", 1)[0].strip()
+                self.state["verify_result_done"] = False
+                self.state["verify_result_passed"] = False
+                self.state["verify_result"] = ""
+                self.state["phase"] = "VERIFY_RESULT"
+
+                print(
+                    "V5.17: MODIFY 完成，进入 VERIFY_RESULT"
+                )
+
+                continue
+
+
+            # V5.17:
+            # MODIFY 后进入 VERIFY_RESULT。
+            # 读取实际修改后的文件，验证修改是否真实落地。
+            if (
+                self.state["phase"] == "VERIFY_RESULT"
+                and self.state["modified_file"]
+            ):
+
+                print()
+                print("========== VERIFY RESULT ==========")
+
+                modified_file = self.state["modified_file"]
+
+                verify_result = self.controller.call(
+                    "read_file_chunk",
+                    f"{modified_file}|1|300"
+                )
+
+                verify_prompt = f"""
+验证刚刚执行的代码修改是否真实成功。
+
+修改文件:
+{modified_file}
+
+修改后的实际源码:
+{verify_result}
+
+只判断：
+1. 文件是否存在并成功读取。
+2. 修改是否已经实际出现在源码中。
+3. 修改后的代码是否明显存在语法错误或结构错误。
+
+不要修改代码。
+不要调用工具。
+
+只输出：
+
+VERIFY_RESULT:
+PASS 或 FAIL
+
+理由:
+<简短说明>
+"""
+
+                result = self.ask_llm(
+                    verify_prompt
+                )
+
+                result = str(result)
+
+                self.state["verify_result"] = result
+                self.state["verify_result_done"] = True
+
+                upper_result = result.upper()
+
+                passed = (
+                    "VERIFY_RESULT:" in upper_result
+                    and "PASS" in upper_result
+                    and "FAIL" not in upper_result
+                )
+
+                self.state["verify_result_passed"] = passed
+
+                print(
+                    "VERIFY_RESULT result =",
+                    result
+                )
+
+                print(
+                    "VERIFY_RESULT passed =",
+                    passed
+                )
+
+                self.state["phase"] = "SUMMARY"
+
+                continue
+
+
             response = self.ask_llm(
                 prompt
             )
@@ -1783,10 +2290,38 @@ PASS 或 FAIL
                 args
             )
 
+            # V5.18:
+            # 禁止在 controller.call() 之前读取项目目录。
+            # 旧逻辑在 call() 之后才检查，目录已经被实际读取，
+            # 并且错误 result 还可能进入 analysis_context。
+            if tool == "read_file_chunk":
+
+                read_path = args.split("|", 1)[0].strip()
+
+                if read_path == self.project:
+
+                    print(
+                        "V5.18: 禁止读取项目目录，改为读取已确认目标文件"
+                    )
+
+                    if self.state["target_file"]:
+
+                        args = (
+                            self.state["target_file"]
+                            + "|1|100"
+                        )
+
+                    else:
+
+                        print(
+                            "V5.18: 没有有效 target_file，拒绝本次读取"
+                        )
+
+                        continue
+
             # V4.9.2：
             # READ 阶段允许连续读取多个候选文件。
             # 不再使用旧版 read_done 阻止后续 READ。
-
 
             result = self.controller.call(
                 tool,
@@ -1795,20 +2330,6 @@ PASS 或 FAIL
 
             print("DEBUG tool returned:", type(result))
             print("DEBUG result length:", len(str(result)))
-            # V4.3.2 reject directory read
-
-            if tool == "read_file_chunk":
-
-                if args.strip() == self.project:
-
-                    print(
-                          "禁止读取项目目录"
-                    )
-
-                    args = (
-                            self.state["target_file"]
-                            + "|1|100"
-                    )
 
             if tool == "read_file_chunk":
 
@@ -2128,6 +2649,25 @@ PASS 或 FAIL
 
                 self.state["analysis_result"] = analysis_result
 
+
+                # V5.4:
+                # 在 V4 原有 Qwen 分析完成后，
+                # 使用同一份 analysis_source 交给 Codex。
+                #
+                # Codex 是独立第二分析通道：
+                # 1. 不覆盖 analysis_result
+                # 2. 不修改 V4 ask_llm()
+                # 3. 不调用工具
+                # 4. 不修改代码
+                #
+                # 当前阶段只保存 Codex 独立分析结果，
+                # 暂不让 Codex 改变状态机判断。
+
+                # V6：Codex 仅预留接口，不参与当前运行。
+                self.state["codex_analysis"] = ""
+                self.state["codex_analyze_done"] = False
+
+
                 self.state["analyze_done"] = True
                 self.state["verify_done"] = False
 
@@ -2234,6 +2774,25 @@ PASS 或 FAIL
                             best_file = file_path
 
 
+                    # V5.19:
+                    # 如果用户任务中明确指定了源码文件，
+                    # 优先使用该文件，不能让文件名 scoring
+                    # 把用户明确指定的目标替换成其他候选文件。
+                    exact_target_file = ""
+
+                    task_text = str(question)
+
+                    path_match = re.search(
+                        r"(/[^\s]+\\.(?:cpp|cc|c|h|hpp))",
+                        task_text
+                    )
+
+                    if path_match:
+                        candidate = path_match.group(1)
+
+                        if os.path.isfile(candidate):
+                            exact_target_file = candidate
+
                     # V4.9.1:
                     # 保存 SEARCH 阶段排名最高的 Top 5 候选文件。
                     ranked_files.sort(
@@ -2241,11 +2800,33 @@ PASS 或 FAIL
                         reverse=True
                     )
 
-                    self.state["target_files"] = [
-                        file_path
-                        for score, file_path
-                        in ranked_files[:5]
-                    ]
+                    if exact_target_file:
+                        self.state["target_files"] = [
+                            exact_target_file
+                        ]
+
+                        print(
+                            "V5.19 exact target:",
+                            exact_target_file
+                        )
+
+                    else:
+                        self.state["target_files"] = [
+                            file_path
+                            for score, file_path
+                            in ranked_files[:5]
+                        ]
+
+                    # V5.11.1:
+                    # SEARCH 已返回候选文件时，直接使用第一个候选。
+                    if not best_file and self.state["target_files"]:
+                        best_file = self.state["target_files"][0]
+
+                        print(
+                            "V5.11.1 direct candidate fallback:",
+                            best_file
+                        )
+
 
                     # V4.9.2：
                     # 每次新的 SEARCH 都从第一个候选文件重新读取。
@@ -2281,6 +2862,46 @@ PASS 或 FAIL
                         "解析搜索结果失败:",
                         e
                     )
+
+                    # V5.11:
+                    # SEARCH 解析失败时，如果用户提供的是明确文件路径，
+                    # 直接进入 READ，避免无意义重复 SEARCH。
+                    fallback_file = ""
+
+                    # V5.11 fix:
+                    # run() 的用户任务实际来自 question。
+                    # SEARCH 解析失败时直接使用当前 question
+                    # 做明确文件路径 fallback。
+                    task_text = str(question)
+
+                    path_match = re.search(
+                        r"(/[^\s]+\.(?:cpp|cc|c|h|hpp))",
+                        task_text
+                    )
+
+                    if path_match:
+                        candidate = path_match.group(1)
+
+                        if os.path.isfile(candidate):
+                            fallback_file = candidate
+
+                    if fallback_file:
+
+                        self.state["target_files"] = [
+                            fallback_file
+                        ]
+
+                        self.state["target_file"] = fallback_file
+                        self.state["read_index"] = 0
+                        self.state["analysis_context"] = []
+                        self.state["read_done"] = False
+
+                        print(
+                            "V5.11 SEARCH fallback:",
+                            fallback_file
+                        )
+
+                        self.state["phase"] = "READ"
 
 
             # V4.9.3:
