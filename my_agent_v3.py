@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 from ai_agent.router import ToolRouter
 
 
-from ai_agent.v3.autonomous_agent import AutonomousAgent
+from v3.autonomous_agent import AutonomousAgent
 from codex_bridge import CodexBridge
 
 
