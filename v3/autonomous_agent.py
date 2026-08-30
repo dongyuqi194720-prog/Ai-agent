@@ -2663,9 +2663,21 @@ PASS 或 FAIL
                 # 当前阶段只保存 Codex 独立分析结果，
                 # 暂不让 Codex 改变状态机判断。
 
-                # V6：Codex 仅预留接口，不参与当前运行。
-                self.state["codex_analysis"] = ""
-                self.state["codex_analyze_done"] = False
+                # V6.1：
+                # Qwen 分析完成后，使用同一份 analysis_prompt
+                # 交给 Codex 做独立第二分析。
+                #
+                # Codex 失败时 ask_codex() 返回空字符串，
+                # 不阻断 V4 主流程。
+
+                codex_analysis = self.ask_codex(
+                    analysis_prompt
+                )
+
+                self.state["codex_analysis"] = codex_analysis
+                self.state["codex_analyze_done"] = bool(
+                    codex_analysis
+                )
 
 
                 self.state["analyze_done"] = True
