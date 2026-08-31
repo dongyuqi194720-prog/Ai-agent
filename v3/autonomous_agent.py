@@ -1,5 +1,7 @@
+import copy
 import json
 import os
+import re
 
 from ai_agent.codex_bridge import CodexBridge
 
@@ -46,6 +48,10 @@ class AutonomousAgent:
             "analysis_context": [], 
 
             "analyze_done": False,
+
+            "analysis_result": "",
+
+            "problem_confirmed": False,
 
             # V5.4:
             # Codex 独立分析结果。
@@ -95,6 +101,12 @@ class AutonomousAgent:
             "verify_retry_count": 0
         }
          
+
+        # V6.1.7:
+        # 保存一份干净的初始任务状态。
+        self._initial_state = copy.deepcopy(
+            self.state
+        )
 
         from .memory import Memory
         from .validator import Validator
@@ -536,6 +548,62 @@ class AutonomousAgent:
                 match
             )
 
+        # V6.1.1:
+        # 普通业务逻辑错误不一定具有内存/并发类“错误机制”。
+        #
+        # 如果证据已经明确给出：
+        #   1. 实际行为/结果
+        #   2. 明确预期行为/结果
+        #   3. 结论明确指出两者不一致构成错误
+        #
+        # 则可以直接保留，不要求命中
+        # use-after-free / deadlock / race 等机制词。
+        #
+        # 这里只识别“明确结果不一致”，
+        # 不放宽“可能导致”等推测性结论。
+
+        business_error_patterns = [
+            "实际结果",
+            "预期结果",
+            "实际返回",
+            "应该返回",
+            "实际值",
+            "预期值",
+            "实际输出",
+            "预期输出",
+            "结果与预期不符",
+            "逻辑错误",
+            "计算错误",
+            "返回错误结果",
+            "错误结果",
+        ]
+
+        has_business_error = (
+            any(
+                pattern in evidence_text
+                for pattern in business_error_patterns
+            )
+            and
+            any(
+                pattern in conclusion_text
+                for pattern in [
+                    "错误",
+                    "缺陷",
+                    "不正确",
+                    "不符合预期",
+                    "与预期不符",
+                ]
+            )
+        )
+
+        if has_business_error:
+            print(
+                "DEBUG: V6.1.1 SUMMARY Validator 检测到"
+                "明确业务结果错误，允许通过"
+            )
+
+            return response
+
         # 明确缺陷结论必须有对应的源码错误机制。
         if not has_mechanism:
             print(
@@ -687,6 +755,107 @@ class AutonomousAgent:
             return (
                 "analyze_code",
                 m.group(1).strip()
+            )
+
+
+        # V6.1.2:
+        # 兼容 Qwen 在 MODIFY 阶段输出的裸 write_file 格式。
+        #
+        # 实际可能输出：
+        #
+        # write_file
+        # /absolute/path/file.py
+        # 完整文件内容
+        #
+        # 只在文本去除前导空白后明确以 write_file 开头时解析，
+        # 避免普通说明文字误触发。
+        stripped_text = text.lstrip()
+
+        if stripped_text.startswith("write_file"):
+            lines = stripped_text.splitlines()
+
+            if (
+                len(lines) >= 3
+                and lines[0].strip() == "write_file"
+            ):
+                path = lines[1].strip()
+
+                file_content = "\n".join(
+                    lines[2:]
+                )
+
+                if not path.startswith("/"):
+                    print(
+                        "V6.1.2 write_file 拒绝：路径不是绝对路径:",
+                        path
+                    )
+                    return None, None
+
+                if not file_content.strip():
+                    print(
+                        "V6.1.2 write_file 拒绝：文件内容为空"
+                    )
+                    return None, None
+
+                print(
+                    "V6.1.2 write_file 裸格式解析成功:",
+                    path
+                )
+
+                return (
+                    "write_file",
+                    path + "|" + file_content
+                )
+
+
+        # V6.1:
+        # MODIFY 阶段解析 write_file。
+        #
+        # 格式：
+        # <write_file>
+        # /absolute/path/file.py
+        # 完整文件内容
+        # </write_file>
+        #
+        # 第一行必须是文件路径。
+        # 后续全部内容作为文件正文。
+        m = re.search(
+            r"<write_file>\s*(.*?)\s*</write_file>",
+            text,
+            re.S
+        )
+
+        if m:
+
+            content = m.group(1).strip()
+
+            lines = content.splitlines()
+
+            if len(lines) < 2:
+                return None, None
+
+            path = lines[0].strip()
+
+            file_content = "\n".join(
+                lines[1:]
+            )
+
+            if not path.startswith("/"):
+                print(
+                    "V6.1 write_file 拒绝：路径不是绝对路径:",
+                    path
+                )
+                return None, None
+
+            if not file_content.strip():
+                print(
+                    "V6.1 write_file 拒绝：文件内容为空"
+                )
+                return None, None
+
+            return (
+                "write_file",
+                path + "|" + file_content
             )
 
 
@@ -890,6 +1059,13 @@ SUMMARY
         self,
         question
     ):
+
+        # V6.1.7:
+        # 每次 run() 都从干净状态开始。
+        # 防止上一个任务的状态污染新任务。
+        self.state = copy.deepcopy(
+            self._initial_state
+        )
 
         self.state["question"] = question
 
@@ -1192,6 +1368,90 @@ SUMMARY
                     and bool(conclusion_text)
                 )
 
+                # V6.1.4:
+                # VERIFY 不仅检查证据格式，还检查证据是否真正
+                # 来自本次 READ 的真实源码。
+                #
+                # 重要：
+                # “证据代码存在于源码”只能证明引用真实，
+                # 不能证明该代码存在业务错误。
+                #
+                # Python 业务逻辑错误如果没有明确的预期语义、
+                # 调用约束或其他直接证据，不允许仅凭函数名称
+                # 或 LLM 自己推测的“应该这样”认定为问题。
+
+                evidence_source_match = False
+
+                normalized_evidence_code = (
+                    evidence_code
+                    .replace("```python", "")
+                    .replace("```", "")
+                    .strip()
+                )
+
+                if evidence_file and normalized_evidence_code:
+
+                    for item in self.state.get(
+                        "analysis_context",
+                        []
+                    ):
+
+                        real_file = str(
+                            item.get("file", "")
+                        ).strip()
+
+                        real_source = str(
+                            item.get("source", "")
+                        )
+
+                        if real_file != evidence_file:
+                            continue
+
+                        source_lines = real_source.splitlines()
+
+                        try:
+                            evidence_line_number = int(
+                                re.search(
+                                    r"\d+",
+                                    evidence_line
+                                ).group(0)
+                            )
+                        except Exception:
+                            evidence_line_number = 0
+
+                        if (
+                            evidence_line_number >= 1
+                            and evidence_line_number <= len(source_lines)
+                        ):
+
+                            start_index = max(
+                                0,
+                                evidence_line_number - 3
+                            )
+
+                            end_index = min(
+                                len(source_lines),
+                                evidence_line_number + 2
+                            )
+
+                            nearby_source = "\n".join(
+                                line.strip()
+                                for line in source_lines[
+                                    start_index:end_index
+                                ]
+                            )
+
+                            if normalized_evidence_code in nearby_source:
+                                evidence_source_match = True
+
+                        if evidence_source_match:
+                            break
+
+                print(
+                    "VERIFY: evidence_source_match =",
+                    evidence_source_match
+                )
+
                 if no_clear_problem:
 
                     verify_ok = (
@@ -1205,6 +1465,7 @@ SUMMARY
                         self.state["analyze_done"]
                         and bool(analysis_text)
                         and structured_evidence
+                        and evidence_source_match
                     )
 
                 print(
@@ -1476,7 +1737,85 @@ SUMMARY
                     )
                 )
 
-                plan_verify_prompt = f"""
+                # V6.1:
+                # 根据目标文件类型选择 PLAN_VERIFY 规则。
+                #
+                # Python 不使用 C/C++ mutex/lock/unlock 审查规则。
+                # C/C++ 保留原有并发安全 PLAN_VERIFY。
+
+                plan_verify_file = ""
+
+                if self.state.get("target_files"):
+                    plan_verify_file = str(
+                        self.state["target_files"][0]
+                    )
+
+                elif self.state.get("target_file"):
+                    plan_verify_file = str(
+                        self.state["target_file"]
+                    )
+
+                if plan_verify_file.lower().endswith(".py"):
+
+                    plan_verify_prompt = f"""
+你现在是独立的 Python 代码修改方案审查者。
+
+不要修改代码。
+不要调用任何工具。
+不要假设没有提供的源码。
+
+===== 已验证的问题分析 =====
+{analysis}
+
+===== 修改计划 =====
+{plan}
+
+请严格判断：
+
+1. 问题是否真的由提供的 Python 源码证据证明。
+2. 修改计划是否真正针对已经确认的问题。
+3. 修改是否与实际源码中的函数、参数和控制流程一致。
+4. 修改后的行为是否能够直接解决已经确认的问题。
+5. 修改是否会破坏现有调用关系。
+6. 修改方案是否明确指出修改文件和修改位置。
+7. 测试方案是否能够验证修改后的实际行为。
+8. 如果问题分析不成立，必须 FAIL。
+9. 如果修改方案与问题无关，必须 FAIL。
+10. 如果源码证据不足以支持修改，必须 FAIL。
+
+重要规则：
+
+- 本次是 Python 文件。
+- 不要求检查 mutex、lock、unlock、condition_variable、thread 或 atomic。
+- 不得因为 Python 文件没有 mutex、lock 或 unlock 而判定 FAIL。
+- 不得套用 C/C++ 并发修改规则。
+- 只能根据已经提供的源码证据和修改计划判断。
+- 不得猜测没有提供的代码。
+- “可能”“推测”“看起来”不能作为 PASS 的依据。
+
+只输出：
+
+PLAN_VERIFY:
+PASS 或 FAIL
+
+理由:
+<简短说明>
+
+如果 FAIL：
+必须明确指出：
+1. 问题分析哪里不成立；
+2. 修改方案哪里存在风险。
+
+如果 PASS：
+必须说明为什么现有源码证据足以支持该修改。
+
+===== 当前目标文件 =====
+{plan_verify_file}
+"""
+
+                else:
+
+                    plan_verify_prompt = f"""
 你现在是独立的代码修改方案审查者。
 
 不要修改代码。
@@ -2178,6 +2517,67 @@ PASS 或 FAIL
                 response
             )
 
+            # V6.1.5:
+            # SEARCH 阶段由状态机强制执行 search_code_index。
+            # VERIFY FAIL -> SEARCH 时，不允许 LLM 再决定读取文件。
+
+            if self.state["phase"] == "SEARCH":
+
+                search_question = str(
+                    self.state.get(
+                        "question",
+                        question
+                    )
+                )
+
+                # V6.1.6:
+                # 用户明确提供真实源码文件时，
+                # SEARCH 阶段直接进入 READ。
+                #
+                # 避免将完整自然语言任务错误地交给
+                # search_code_index 后触发无效 JSON 解析。
+
+                path_match = re.search(
+                    r"(/[^\\s]+\\.(?:py|cpp|cc|c|h|hpp))",
+                    search_question
+                )
+
+                if (
+                    path_match
+                    and os.path.isfile(path_match.group(1))
+                ):
+
+                    candidate = path_match.group(1)
+
+                    self.state["target_files"] = [candidate]
+                    self.state["target_file"] = candidate
+                    self.state["read_index"] = 0
+                    self.state["analysis_context"] = []
+                    self.state["read_done"] = False
+
+                    print(
+                        "V6.1.6 exact file bypass:",
+                        candidate
+                    )
+
+                    self.state["phase"] = "READ"
+
+                    continue
+
+                tool = "search_code_index"
+
+                args = search_question
+
+                print(
+                    "V6.1.5 SEARCH 强制执行:",
+                    tool
+                )
+
+                print(
+                    "V6.1.5 SEARCH 参数:",
+                    args
+                )
+
             # V4.3.2 force read after search
 
             if (
@@ -2275,6 +2675,9 @@ PASS 或 FAIL
                     "当前阶段:",
                     self.state["phase"]
                 )
+
+                if self.state["phase"] == "SUMMARY":
+                    break
 
                 continue
 
@@ -2548,7 +2951,91 @@ PASS 或 FAIL
                     len(analysis_source)
                 )
 
-                analysis_prompt = f"""
+                # V6.1:
+                # 根据目标文件类型选择分析模式。
+                #
+                # .py 使用 Python 功能/逻辑审查。
+                # C/C++ 保留 V4.10.1 原有并发审查。
+                analysis_file = ""
+
+                if self.state.get("target_files"):
+                    analysis_file = str(
+                        self.state["target_files"][0]
+                    )
+
+                elif self.state.get("target_file"):
+                    analysis_file = str(
+                        self.state["target_file"]
+                    )
+
+                if analysis_file.lower().endswith(".py"):
+
+                    analysis_prompt = f"""
+请对下面提供的 Python 源码进行严格的功能和逻辑审查。
+
+源码:
+{analysis_source}
+
+请重点检查真实源码中的明确问题，包括：
+
+1. 函数实现、参数和调用方式是否存在源码可以直接证明的矛盾。
+2. 返回值和计算逻辑是否存在源码可以直接证明的错误。
+3. 变量使用是否存在源码可以直接证明的错误。
+4. 条件判断、循环和控制流程是否存在源码可以直接证明的错误。
+5. 函数调用和参数传递是否存在源码可以直接证明的错误。
+6. 是否存在源码可以直接证明的运行时错误。
+7. 是否存在可以仅根据提供源码直接证明的逻辑 bug。
+
+特别规则：
+
+- 不能仅根据函数名称推测函数应该执行什么操作。
+- 不能把函数名中的 total、sum、count、create、delete 等词直接解释为某种具体实现要求。
+- 例如：
+  calculate_total(price, quantity)
+  return price * quantity
+  不能仅因为函数名包含 total，就推断应该执行 price + quantity。
+- 如果源码没有提供明确的预期语义、调用约束或其他直接证据，不能因为名称与实现存在语义上的猜测差异而认定为明确问题。
+- “名称看起来应该这样”“通常应该这样”“可能应该这样”都不能作为明确问题依据。
+
+如果发现明确问题，必须输出：
+
+Python 审查:
+
+问题:
+<明确的问题>
+
+证据:
+
+文件: <源码中的完整文件路径>
+行号: <源码中的实际行号>
+代码: <直接引用提供源码中的代码>
+说明: <根据实际源码明确说明为什么这是错误>
+
+结论:
+<明确说明问题、触发方式和后果>
+
+如果没有明确问题：
+
+未发现明确问题
+
+重要要求：
+
+1. 只能使用上面提供的源码作为证据。
+2. 文件路径必须来自提供的源码。
+3. 行号必须来自提供源码中的实际行号。
+4. 代码必须直接来自提供的源码，禁止编造。
+5. 必须优先判断实际代码行为，不能只根据函数名称猜测。
+6. 如果源码不足以证明问题，不得认定为明确问题。
+7. “可能”“推测”“看起来”不能作为明确问题的依据。
+8. 只报告明确、可验证的问题。
+9. 使用简短中文回答。
+
+只根据给出的源码判断，不要猜测没有提供的代码。
+"""
+
+                else:
+
+                    analysis_prompt = f"""
 请对下面提供的 C/C++ 源码进行一次严格的并发安全审查。
 
 源码:
@@ -2670,14 +3157,11 @@ PASS 或 FAIL
                 # Codex 失败时 ask_codex() 返回空字符串，
                 # 不阻断 V4 主流程。
 
-                codex_analysis = self.ask_codex(
-                    analysis_prompt
-                )
-
-                self.state["codex_analysis"] = codex_analysis
-                self.state["codex_analyze_done"] = bool(
-                    codex_analysis
-                )
+                # V6 当前阶段：
+                # Codex 尚未接入运行流程。
+                # 保留状态字段，但不调用 Codex。
+                self.state["codex_analysis"] = ""
+                self.state["codex_analyze_done"] = False
 
 
                 self.state["analyze_done"] = True
@@ -2702,6 +3186,34 @@ PASS 或 FAIL
             if tool == "search_code_index":
 
                 self.state["search_done"] = True
+
+                # V6.0:
+                # 用户明确提供存在的绝对源码文件时，
+                # 不依赖项目索引，直接进入 READ。
+                task_text = str(question)
+
+                path_match = re.search(
+                    r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
+                    task_text
+                )
+
+                if path_match:
+                    candidate = path_match.group(1)
+
+                    if os.path.isfile(candidate):
+                        self.state["target_files"] = [candidate]
+                        self.state["target_file"] = candidate
+                        self.state["read_index"] = 0
+                        self.state["analysis_context"] = []
+                        self.state["read_done"] = False
+
+                        print(
+                            "V6.0 exact file bypass:",
+                            candidate
+                        )
+
+                        self.state["phase"] = "READ"
+                        continue
 
                 try:
                     import json
@@ -2795,7 +3307,7 @@ PASS 或 FAIL
                     task_text = str(question)
 
                     path_match = re.search(
-                        r"(/[^\s]+\\.(?:cpp|cc|c|h|hpp))",
+                        r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
                         task_text
                     )
 
@@ -2887,7 +3399,7 @@ PASS 或 FAIL
                     task_text = str(question)
 
                     path_match = re.search(
-                        r"(/[^\s]+\.(?:cpp|cc|c|h|hpp))",
+                        r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
                         task_text
                     )
 
@@ -2914,6 +3426,14 @@ PASS 或 FAIL
                         )
 
                         self.state["phase"] = "READ"
+
+                    else:
+                        print(
+                            "V6.1.9 SEARCH 无结果，停止重复搜索"
+                        )
+
+                        self.state["summary_done"] = True
+                        self.state["phase"] = "SUMMARY"
 
 
             # V4.9.3:

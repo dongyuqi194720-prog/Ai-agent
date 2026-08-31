@@ -193,6 +193,25 @@ class Controller:
                     }
 
 
+        # V6.1:
+        # write_file 的 extract_tool 输出格式：
+        # path|完整文件内容
+        #
+        # 只按第一个 | 分割，保证文件正文中的 | 不会被截断。
+        if name == "write_file":
+
+            if isinstance(args, str):
+
+                parts = args.split("|", 1)
+
+                if len(parts) == 2:
+
+                    args = {
+                        "path": parts[0],
+                        "content": parts[1]
+                    }
+
+
         args = self.normalize_args(
             name,
             args
