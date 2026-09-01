@@ -32,6 +32,7 @@ class AutonomousAgent:
         self.state = {
             "phase": "SEARCH",
 
+            "task_mode": "REVIEW",
             "search_done": False,
 
             "target_file": None,
@@ -903,6 +904,75 @@ class AutonomousAgent:
         observation
     ):
 
+        task_mode = self.state.get(
+            "task_mode",
+            "REVIEW"
+        )
+
+        if task_mode == "CHANGE":
+
+            task_instruction = """
+当前是 CHANGE 任务。
+
+用户已经明确提出了修改要求。
+
+ANALYZE 不需要寻找一个额外的“Bug”作为修改理由。
+
+你的核心任务是判断：
+
+当前真实源码是否满足用户明确提出的要求。
+
+如果源码不满足用户要求：
+
+必须：
+1. 指出真实源码中与用户要求不一致的地方。
+2. 引用本次 READ 得到的真实源码。
+3. 给出文件、行号、代码和说明。
+4. 在结论中明确说明当前实现不满足用户要求。
+5. 不允许把用户要求之外的问题作为修改理由。
+
+如果源码已经满足用户要求：
+
+必须输出：
+
+问题:
+未发现明确问题
+
+证据:
+引用真实源码
+
+结论:
+未发现明确问题
+
+禁止因为“可以进一步优化”而提出修改。
+
+禁止猜测不存在的代码。
+
+禁止把潜在风险当成明确问题。
+"""
+
+        else:
+
+            task_instruction = """
+当前是 REVIEW 任务。
+
+请检查本次 READ 得到的真实源码是否存在明确问题。
+
+只有源码能够直接证明的问题才能作为主要问题。
+
+如果没有明确问题：
+
+问题:
+未发现明确问题
+
+结论:
+未发现明确问题
+
+禁止把潜在风险、猜测或代码行为描述包装成明确 Bug。
+
+禁止编造源码证据。
+"""
+
         return f"""
 当前状态规则:
 
@@ -910,69 +980,52 @@ SEARCH阶段:
 只能搜索代码。
 
 READ阶段:
-只能读取文件。
+只能读取代码。
 
 ANALYZE阶段:
 只能分析代码，不允许修改。
 
-SUMMARY阶段:
-输出分析结论和修改建议。
-
-没有完成完整分析前，禁止调用write_file。
-当前 Agent 执行状态:
-
-阶段:
-{self.state["phase"]}
-
-规则:
-
-SEARCH阶段:
-只能执行:
-- search_code_index
-
-READ阶段:
-只能执行:
-- read_file_chunk
-
-ANALYZE阶段:
-只能执行:
-- analyze_code
-
 VERIFY阶段:
 验证分析结果是否有充分源码证据。
-没有明确问题则进入SUMMARY。
-发现明确问题则进入PLAN_VERIFY。
+
+没有明确问题：
+进入 SUMMARY。
+
+发现明确问题：
+进入 MODIFY_PLAN。
 
 PLAN_VERIFY阶段:
-验证修改计划是否有明确问题、明确文件、明确修改内容。
-只有计划验证通过才能进入MODIFY。
+验证修改计划是否有明确问题、明确文件和明确修改内容。
+
+只有 PLAN_VERIFY 通过才能进入 MODIFY。
 
 MODIFY阶段:
 只能执行:
 - write_file
 
 VERIFY_RESULT阶段:
-验证修改是否成功。
+验证实际修改是否成功。
 
 SUMMARY阶段:
-停止调用工具，输出总结。
+停止调用工具并输出最终总结。
 
 严格限制:
-1. 每次只能执行一个工具
-2. 工具返回后重新判断
-3. 不允许重复执行已经完成的阶段
-4. 不允许跳过阶段
-重要规则:
 
-一次回复只能调用一个工具。
+1. 每次只能执行一个工具。
+2. 工具返回后重新判断。
+3. 不允许重复执行已经完成的阶段。
+4. 不允许跳过状态机阶段。
+5. 没有完成 VERIFY 和 PLAN_VERIFY，不允许调用 write_file。
+6. 不允许编造源码证据。
+7. 不允许猜测没有提供的代码。
+8. 确定性的流程交给 Python 状态机。
+9. 代码理解交给 LLM。
 
-禁止同时输出多个:
-<search_code_index>
-<read_file_chunk>
-<analyze_code>
+当前任务模式:
+{task_mode}
 
-完成一个工具后，
-等待下一轮。
+{task_instruction}
+
 当前阶段:
 {self.state["phase"]}
 
@@ -980,80 +1033,63 @@ SUMMARY阶段:
 搜索={self.state["search_done"]}
 读取={self.state["read_done"]}
 分析={self.state["analyze_done"]}
+
 你是 AI Programmer 自主执行 Agent。
 
 项目:
 {self.project}
 
-
 用户任务:
 {question}
-
 
 当前工具结果:
 {observation}
 
-
-执行规则:
-
-1. 不能询问用户。
-
-2. 必须自主完成任务。
-
-3. 分析源码流程:
+执行流程:
 
 search_code_index
- ->
+->
 read_file_chunk
- ->
+->
 analyze_code
- ->
+->
 VERIFY
- ->
+->
+MODIFY_PLAN
+->
 PLAN_VERIFY
- ->
+->
 MODIFY
- ->
+->
 VERIFY_RESULT
- ->
+->
 SUMMARY
 
+如果已经获得目标文件路径：
+禁止再次搜索。
 
-4. 搜索必须使用:
-
-<search_code_index>
-关键词
-</search_code_index>
-
-
-5. 读取源码必须使用:
+读取源码必须使用:
 
 <read_file_chunk>
 文件路径|开始行|数量
 </read_file_chunk>
 
+分析源码必须使用:
 
-6. 禁止:
+<analyze_code>
+文件路径
+</analyze_code>
+
+禁止:
 - grep
 - find
 - shell搜索
 
-
-如果已经获得文件路径，
-禁止再次搜索。
-
+一次回复只能调用一个工具。
 
 继续执行下一步。
-5. read_file_chunk 的文件路径必须来自 search_code_index 返回的 file 字段。
-
-6. 禁止读取项目目录，例如:
-   /home/baixin/llama.cpp
-
-7. 如果搜索结果包含:
-   /tools/server/server-queue.cpp
-
-   必须读取该文件。
 """
+
 
     def run(
         self,
@@ -1068,6 +1104,34 @@ SUMMARY
         )
 
         self.state["question"] = question
+
+        change_keywords = [
+            "修改",
+            "增加",
+            "添加",
+            "删除",
+            "移除",
+            "替换",
+            "实现",
+            "支持",
+            "修复",
+            "改成",
+            "调整",
+        ]
+
+        self.state["task_mode"] = (
+            "CHANGE"
+            if any(
+                keyword in question
+                for keyword in change_keywords
+            )
+            else "REVIEW"
+        )
+
+        print(
+            "V6.1 task mode:",
+            self.state["task_mode"]
+        )
 
         print()
 
