@@ -1379,7 +1379,7 @@ SUMMARY
                 )
 
                 code_match = re.search(
-                    r"代码\s*[:：]\s*(.+)",
+                    r"代码\s*[:：]\s*([\s\S]+?)(?=\n说明\s*[:：]|\n结论\s*[:：]|$)",
                     analysis_text
                 )
 
@@ -1446,11 +1446,15 @@ SUMMARY
 
                 evidence_source_match = False
 
-                normalized_evidence_code = (
-                    evidence_code
-                    .replace("```python", "")
-                    .replace("```", "")
-                    .strip()
+                normalized_evidence_code = "\n".join(
+                    line.strip()
+                    for line in (
+                        evidence_code
+                        .replace("```python", "")
+                        .replace("```", "")
+                        .splitlines()
+                    )
+                    if line.strip()
                 )
 
                 if evidence_file and normalized_evidence_code:
@@ -1469,6 +1473,12 @@ SUMMARY
                         )
 
                         if real_file != evidence_file:
+                            print(
+                                "V6.3 DEBUG file mismatch:",
+                                repr(real_file),
+                                "!=",
+                                repr(evidence_file)
+                            )
                             continue
 
                         source_lines = real_source.splitlines()
@@ -1499,10 +1509,23 @@ SUMMARY
                             )
 
                             nearby_source = "\n".join(
-                                line.strip()
+                                re.sub(
+                                    r"^\s*\d+\s*:\s*",
+                                    "",
+                                    line
+                                ).strip()
                                 for line in source_lines[
                                     start_index:end_index
                                 ]
+                            )
+
+                            print(
+                                "V6.3 DEBUG normalized_evidence_code =",
+                                repr(normalized_evidence_code)
+                            )
+                            print(
+                                "V6.3 DEBUG nearby_source =",
+                                repr(nearby_source)
                             )
 
                             if normalized_evidence_code in nearby_source:
@@ -1535,6 +1558,62 @@ SUMMARY
                     self.state["phase"] = "SUMMARY"
 
                     continue
+
+                # V6.3: CHANGE 任务必须根据已验证的需求缺失决定是否允许修改。
+                # 不依赖 LLM 的“结论”字段，避免“问题描述明确指出缺失”但结论写成“未发现明确问题”。
+                task_mode = self.state.get(
+                    "task_mode",
+                    "REVIEW"
+                )
+                if task_mode == "CHANGE":
+                    # V6.3: 通用 CHANGE 需求缺失判断。
+                    # 只根据 ANALYZE 的“问题”段判断，
+                    # 不绑定具体业务关键词，也不依赖“结论”字段。
+                    problem_match = re.search(
+                        r"问题\s*[:：](.*?)(?=证据\s*[:：]|$)",
+                        analysis_text,
+                        re.S
+                    )
+
+                    problem_text = (
+                        problem_match.group(1).strip()
+                        if problem_match
+                        else ""
+                    )
+
+                    missing_markers = (
+                        "不满足",
+                        "未满足",
+                        "没有",
+                        "缺少",
+                        "未实现",
+                        "未增加",
+                        "未添加",
+                        "未修改",
+                        "不符合",
+                        "未支持",
+                        "不支持",
+                    )
+
+                    change_not_satisfied = (
+                        bool(problem_text)
+                        and any(
+                            marker in problem_text
+                            for marker in missing_markers
+                        )
+                    )
+
+                    self.state["problem_confirmed"] = (
+                        change_not_satisfied
+                    )
+                    self.state["can_modify"] = (
+                        change_not_satisfied
+                    )
+
+                    print(
+                        "V6.3 CHANGE 需求缺失判断 =",
+                        change_not_satisfied
+                    )
 
                 if no_clear_problem:
 
@@ -1621,8 +1700,188 @@ SUMMARY
                         "REVIEW"
                     )
 
+                    # V6.3:
+                    # CHANGE 任务中，VERIFY 已确认源码不满足用户要求，
+                    # 继续进入修改计划，而不是直接结束自主执行。
+                    if (
+                        task_mode == "CHANGE"
+                        and self.state.get("problem_confirmed", False)
+                        and self.state.get("can_modify", False)
+                    ):
+                        self.state["phase"] = "MODIFY_PLAN"
+                        print(
+                            "V6.3 VERIFY: CHANGE 问题已确认，进入 MODIFY_PLAN"
+                        )
+                        continue
 
                 break
+
+
+            # V6.3: MODIFY_PLAN
+            # VERIFY 已确认 CHANGE 问题后，由 LLM 生成修改计划。
+            # 计划生成完成后立即进入独立 PLAN_VERIFY。
+            if (
+                self.state["phase"] == "MODIFY_PLAN"
+                and self.state.get("problem_confirmed", False)
+                and self.state.get("can_modify", False)
+                and not self.state.get("modify_plan_done", False)
+            ):
+                print()
+                print("========== MODIFY_PLAN ==========")
+
+                analysis = str(
+                    self.state.get(
+                        "analysis_result",
+                        ""
+                    )
+                )
+                question = str(
+                    self.state.get(
+                        "question",
+                        ""
+                    )
+                )
+                target_file = str(
+                    self.state.get(
+                        "target_file",
+                        ""
+                    )
+                )
+
+                plan_prompt = f"""
+你现在负责制定代码修改计划。
+
+===== 用户原始需求 =====
+{question}
+
+===== 已验证的问题分析 =====
+{analysis}
+
+===== 目标文件 =====
+{target_file}
+
+请制定一个最小、明确、可执行的修改计划。
+
+要求：
+1. 只能修改目标文件。
+2. 必须满足用户原始需求中的所有明确要求。
+3. 必须明确说明要修改的函数、参数和返回逻辑。
+4. 不得增加用户没有要求的功能。
+5. 不得猜测不存在的源码。
+6. 只输出修改计划文本，不要调用工具。
+"""
+
+                response = self.ask_llm(plan_prompt)
+
+                if response and str(response).strip():
+                    self.state["modify_plan"] = str(response).strip()
+                    self.state["modify_plan_done"] = True
+                    self.state["plan_verify_done"] = False
+                    self.state["plan_verify_passed"] = False
+                    self.state["plan_verify_result"] = ""
+                    self.state["phase"] = "PLAN_VERIFY"
+
+                    print("V6.3 MODIFY_PLAN 完成 → PLAN_VERIFY")
+                    continue
+
+                print("V6.3 MODIFY_PLAN 失败，停止修改")
+                self.state["can_modify"] = False
+                self.state["summary_done"] = True
+                self.state["phase"] = "SUMMARY"
+                continue
+
+
+            # V6.3: PLAN_VERIFY
+            # 独立验证 MODIFY_PLAN，验证通过后才允许进入 MODIFY。
+            if (
+                self.state["phase"] == "PLAN_VERIFY"
+                and self.state.get("modify_plan_done", False)
+                and not self.state.get("plan_verify_done", False)
+            ):
+                print()
+                print("========== PLAN_VERIFY ==========")
+
+                question = str(
+                    self.state.get("question", "")
+                )
+                analysis = str(
+                    self.state.get("analysis_result", "")
+                )
+                modify_plan = str(
+                    self.state.get("modify_plan", "")
+                )
+                target_file = str(
+                    self.state.get("target_file", "")
+                )
+
+                plan_verify_prompt = f"""
+你现在负责验证代码修改计划。
+
+===== 用户原始需求 =====
+{question}
+
+===== 已验证的问题分析 =====
+{analysis}
+
+===== 目标文件 =====
+{target_file}
+
+===== 修改计划 =====
+{modify_plan}
+
+请判断这个修改计划是否能够完整、正确地满足用户原始需求。
+
+检查：
+1. 是否只修改目标文件。
+2. 是否保留用户明确要求保留的内容。
+3. 是否实现用户明确要求增加、修改或删除的内容。
+4. 修改后的行为是否满足用户原始需求。
+5. 不得加入用户没有要求的功能。
+6. 不得猜测不存在的源码。
+7. 如果计划存在任何明确错误、遗漏或与原始需求冲突，输出 FAIL。
+8. 只有完全满足用户原始需求时，才输出 PASS。
+
+只输出一行：
+PASS
+或
+FAIL
+"""
+
+                response = self.ask_llm(
+                    plan_verify_prompt
+                )
+
+                result = str(
+                    response or ""
+                ).strip()
+
+                self.state["plan_verify_done"] = True
+                self.state["plan_verify_result"] = result
+
+                first_line = (
+                    result.splitlines()[0].strip().upper()
+                    if result
+                    else ""
+                )
+
+                if first_line == "PASS":
+                    self.state["plan_verify_passed"] = True
+                    self.state["phase"] = "MODIFY"
+
+                    print(
+                        "V6.3 PLAN_VERIFY 通过 → MODIFY"
+                    )
+                    continue
+
+                self.state["plan_verify_passed"] = False
+                self.state["can_modify"] = False
+                self.state["summary_done"] = True
+                self.state["phase"] = "SUMMARY"
+
+                print(
+                    "V6.3 PLAN_VERIFY 未通过 → 禁止 MODIFY"
+                )
+                continue
 
 
             # V5.16:
@@ -1881,6 +2140,101 @@ PASS 或 FAIL
                 print()
                 print("========== 任务完成 ==========")
                 break
+
+            # V6.3:
+            # PLAN_VERIFY 失败后由状态机直接生成确定性失败报告，
+            # 禁止再次进入通用 LLM 流程。
+            if (
+                self.state.get("phase") == "SUMMARY"
+                and self.state.get("task_mode") == "CHANGE"
+                and self.state.get("plan_verify_done", False)
+                and not self.state.get("plan_verify_passed", False)
+                and not self.state.get("verify_result_done", False)
+            ):
+                response = (
+                    "### 最终报告\n\n"
+                    "1. **执行结果**：未执行修改。\n\n"
+                    "2. **原因**：修改计划未通过 PLAN_VERIFY。\n\n"
+                    "3. **安全处理**：V6.3 已阻止进入 MODIFY。\n\n"
+                    "4. **结论**：本次任务未对目标文件执行修改。"
+                )
+
+                self.state["summary_done"] = True
+
+                print(
+                    "V6.3 SUMMARY: PLAN_VERIFY 未通过，"
+                    "跳过 LLM 总结"
+                )
+                print()
+                print("========== 最终报告 ==========")
+                print(response)
+                print()
+                print("========== 任务完成 ==========")
+
+                break
+
+
+            # V6.3:
+            # CHANGE 任务在 VERIFY_RESULT 完成后，
+            # 结果已经由状态机确定，不再调用 LLM 总结。
+            if (
+                self.state.get("phase") == "SUMMARY"
+                and self.state.get("task_mode") == "CHANGE"
+                and self.state.get("verify_result_done", False)
+            ):
+                verify_passed = self.state.get(
+                    "verify_result_passed",
+                    False
+                )
+
+                if verify_passed:
+                    response = (
+                        "### 最终报告\n\n"
+                        "1. **执行结果**：修改成功。\n\n"
+                        "2. **修改文件**："
+                        + str(
+                            self.state.get(
+                                "target_file",
+                                ""
+                            )
+                        )
+                        + "\n\n"
+                        "3. **修改内容**：已按照用户原始需求完成代码修改。\n\n"
+                        "4. **验证结果**：VERIFY_RESULT 已通过，"
+                        "修改后的实际源码满足用户原始需求。\n\n"
+                        "5. **结论**：本次任务已完成。"
+                    )
+                else:
+                    response = (
+                        "### 最终报告\n\n"
+                        "1. **执行结果**：修改未通过最终验证。\n\n"
+                        "2. **修改文件**："
+                        + str(
+                            self.state.get(
+                                "target_file",
+                                ""
+                            )
+                        )
+                        + "\n\n"
+                        "3. **验证结果**：VERIFY_RESULT 未通过。\n\n"
+                        "4. **安全处理**：未确认修改结果满足用户需求。\n\n"
+                        "5. **结论**：本次任务未确认成功完成。"
+                    )
+
+                self.state["summary_done"] = True
+
+                print(
+                    "V6.3 SUMMARY: CHANGE 结果确定，"
+                    "跳过 LLM 总结"
+                )
+                print()
+                print("========== 最终报告 ==========")
+                print(response)
+                print()
+                print("========== 任务完成 ==========")
+
+                break
+
 
             response = self.ask_llm(
                 prompt
