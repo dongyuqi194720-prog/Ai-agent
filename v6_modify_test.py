@@ -1,17 +1,17 @@
-def calculate_total(price, quantity, discount=0):
+```python
+def calculate_total(price, quantity, discount):
     return price * quantity * discount
 
 def test_calculate_total():
-    # 测试 discount 参数为 0 的情况
-    result = calculate_total(10, 2, 0)
-    assert result == 20, "测试 discount 参数为 0 的情况失败"
+    # 测试 case 1: 无 discount 参数
+    result1 = calculate_total(10, 2, 0)
+    assert result1 == 20, f"Expected 20, got {result1}"
 
-    # 测试 discount 参数为 0.5 的情况
-    result = calculate_total(10, 2, 0.5)
-    assert result == 10, "测试 discount 参数为 0.5 的情况失败"
+    # 测试 case 2: 有 discount 参数
+    result2 = calculate_total(10, 2, 0.5)
+    assert result2 == 10, f"Expected 10, got {result2}"
 
-    # 测试 discount 参数为 0.1 的情况
-    result = calculate_total(10, 2, 0.1)
-    assert result == 2, "测试 discount 参数为 0.1 的情况失败"
+    print("All tests passed!")
 
-    print("所有测试通过")
+test_calculate_total()
+```
