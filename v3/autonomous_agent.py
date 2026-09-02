@@ -2062,6 +2062,9 @@ CHANGE 的核心规则：
 不要调用任何工具。
 不要假设没有提供的源码。
 
+===== 用户原始需求 =====
+{question}
+
 ===== 已验证的问题分析 =====
 {analysis}
 
@@ -2080,6 +2083,8 @@ CHANGE 的核心规则：
 8. 如果问题分析不成立，必须 FAIL。
 9. 如果修改方案与问题无关，必须 FAIL。
 10. 如果源码证据不足以支持修改，必须 FAIL。
+11. 修改计划必须满足用户原始需求中的所有明确要求。
+12. 如果修改计划与用户原始需求存在明确冲突，必须 FAIL。
 
 重要规则：
 
@@ -2771,9 +2776,22 @@ REVIEW 时：
                         "DEBUG: SUMMARY 生成完成"
                     )
 
-                response = self.validate_summary(
-                    response
+                # V6.1.14:
+                # CHANGE 任务的成功/失败结论已经由状态机确定，
+                # 不再允许 SUMMARY Validator 覆盖确定性结论。
+                summary_is_deterministic = (
+                    task_mode == "CHANGE"
+                    and problem_confirmed
+                    and (
+                        plan_verify_passed
+                        or not verify_result_passed
+                    )
                 )
+
+                if not summary_is_deterministic:
+                    response = self.validate_summary(
+                        response
+                    )
 
                 print()
                 print("========== 最终报告 ==========")
@@ -2841,6 +2859,29 @@ path
                 tool, args = self.extract_tool(
                     response
                 )
+
+                # V6.1.11:
+                # MODIFY 的目标文件必须由状态机锁定。
+                # 禁止 LLM 自行决定写入路径。
+                target_file = self.state.get(
+                    "target_file",
+                    ""
+                )
+
+                if tool == "write_file" and target_file:
+                    parts = args.split("|", 1)
+
+                    if len(parts) == 2:
+                        args = (
+                            target_file
+                            + "|"
+                            + parts[1]
+                        )
+
+                        print(
+                            "V6.1.11 MODIFY 强制目标文件:",
+                            target_file
+                        )
 
                 if tool != "write_file":
 
@@ -2922,7 +2963,10 @@ path
                 )
 
                 verify_prompt = f"""
-验证刚刚执行的代码修改是否真实成功。
+验证刚刚执行的代码修改是否真实成功，并且是否满足用户原始需求。
+
+用户原始需求:
+{question}
 
 修改文件:
 {modified_file}
@@ -2930,10 +2974,24 @@ path
 修改后的实际源码:
 {verify_result}
 
+已验证的问题分析:
+{analysis}
+
 只判断：
 1. 文件是否存在并成功读取。
 2. 修改是否已经实际出现在源码中。
 3. 修改后的代码是否明显存在语法错误或结构错误。
+4. 修改后的实际行为是否满足用户原始需求中的明确要求。
+5. 如果用户明确要求增加、删除、修改或替换某个参数、函数行为或返回值，必须检查实际源码是否真的满足该要求。
+6. 如果实际修改与用户原始需求存在明确冲突，必须 FAIL。
+7. 不得因为源码没有实现用户没有要求的额外功能而 FAIL。
+8. 不得猜测没有提供的代码。
+9. 只能根据用户原始需求和已经读取到的实际源码判断。
+
+特别规则：
+- 本次如果是 CHANGE 任务，不能只因为“代码已经写入文件”就 PASS。
+- 必须确认实际源码满足用户原始需求。
+- “可能”“推测”“看起来”不能作为 PASS 的依据。
 
 不要修改代码。
 不要调用工具。
