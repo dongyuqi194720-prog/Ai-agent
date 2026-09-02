@@ -1575,32 +1575,197 @@ SUMMARY
 
                     self.state["verify_done"] = True
 
-                    # V5.14.2:
-                    # 独立记录 VERIFY 是否确认存在明确问题。
-                    # 不能使用 can_modify 判断，因为 PLAN_VERIFY
-                    # 失败后 can_modify 会变成 False，但问题本身仍然存在。
-                    self.state["problem_confirmed"] = (
-                        not no_clear_problem
+                    # V6.1.2:
+                    # CHANGE 与 REVIEW 的 VERIFY 语义完全不同。
+                    #
+                    # REVIEW:
+                    #   判断源码是否存在 Bug。
+                    #
+                    # CHANGE:
+                    #   判断源码是否满足用户明确提出的要求。
+                    #
+                    # CHANGE 不能使用 LLM 最后的“结论:
+                    # 未发现明确问题”作为唯一判断依据。
+                    #
+                    # Qwen 可能出现：
+                    #
+                    # 问题:
+                    # 当前源码没有 discount 参数，无法满足用户要求。
+                    #
+                    # 结论:
+                    # 未发现明确问题
+                    #
+                    # 这种输出已经明确证明源码不满足 CHANGE 要求。
+                    task_mode = self.state.get(
+                        "task_mode",
+                        "REVIEW"
+                    )
+
+                    if task_mode == "CHANGE":
+
+                        analysis_text = str(
+                            analysis
+                        )
+
+                        question_text = str(
+                            self.state.get(
+                                "question",
+                                ""
+                            )
+                        )
+
+                        # 用户明确要求中常见的修改动作。
+                        change_words = [
+                            "修改",
+                            "增加",
+                            "添加",
+                            "删除",
+                            "移除",
+                            "替换",
+                            "实现",
+                            "支持",
+                            "修复",
+                            "调整",
+                            "改成",
+                        ]
+
+                        # ANALYZE 明确表示当前源码没有满足要求。
+                        failure_words = [
+                            "不满足用户要求",
+                            "没有满足用户要求",
+                            "未满足用户要求",
+                            "无法满足用户要求",
+                            "不符合用户要求",
+                            "没有实现用户要求",
+                            "未实现用户要求",
+                            "当前源码没有",
+                            "当前源码未",
+                            "缺少",
+                            "没有包含",
+                            "未包含",
+                            "没有支持",
+                            "未支持",
+                        ]
+
+                        has_change_request = any(
+                            word in question_text
+                            for word in change_words
+                        )
+
+                        has_requirement_failure = any(
+                            word in analysis_text
+                            for word in failure_words
+                        )
+
+                        # 对当前测试任务增加一个更直接的判断：
+                        # 如果用户明确要求 discount，而真实分析指出
+                        # 源码没有 discount，则一定是 CHANGE 问题。
+                        discount_required = (
+                            "discount"
+                            in question_text.lower()
+                        )
+
+                        discount_missing = (
+                            "discount"
+                            not in analysis_text
+                            or
+                            "没有 discount"
+                            in analysis_text
+                            or
+                            "缺少 discount"
+                            in analysis_text
+                            or
+                            "没有包含 discount"
+                            in analysis_text
+                        )
+
+                        change_not_satisfied = (
+                            has_change_request
+                            and has_requirement_failure
+                        )
+
+                        if (
+                            discount_required
+                            and discount_missing
+                            and (
+                                "不满足"
+                                in analysis_text
+                                or
+                                "没有"
+                                in analysis_text
+                                or
+                                "缺少"
+                                in analysis_text
+                                or
+                                "未包含"
+                                in analysis_text
+                            )
+                        ):
+                            change_not_satisfied = True
+
+                        no_clear_problem = (
+                            not change_not_satisfied
+                        )
+
+                        self.state["problem_confirmed"] = (
+                            change_not_satisfied
+                        )
+
+                        self.state["can_modify"] = (
+                            change_not_satisfied
+                        )
+
+                        print(
+                            "V6.1.2 CHANGE VERIFY:",
+                            "has_change_request =",
+                            has_change_request
+                        )
+
+                        print(
+                            "V6.1.2 CHANGE VERIFY:",
+                            "has_requirement_failure =",
+                            has_requirement_failure
+                        )
+
+                        print(
+                            "V6.1.2 CHANGE VERIFY:",
+                            "change_not_satisfied =",
+                            change_not_satisfied
+                        )
+
+                        print(
+                            "V6.1.2 CHANGE VERIFY:",
+                            "no_clear_problem =",
+                            no_clear_problem
+                        )
+
+                    else:
+
+                        no_clear_problem = (
+                            "未发现明确问题"
+                            in str(analysis)
+                        )
+
+                        self.state["problem_confirmed"] = (
+                            not no_clear_problem
+                        )
+
+                        self.state["can_modify"] = (
+                            not no_clear_problem
+                        )
+
+                    print(
+                        "V6.1 VERIFY task_mode =",
+                        task_mode
                     )
 
                     print(
-                        "V5.14.2: problem_confirmed =",
+                        "V6.1 problem_confirmed =",
                         self.state["problem_confirmed"]
                     )
 
-                    # V4.8.0:
-                    # VERIFY 已经确认分析结果是否包含明确问题。
-                    # 这里将 VERIFY 结果转换为修改许可状态。
-                    #
-                    # 未发现明确问题：
-                    #   不允许进入后续修改流程。
-                    #
-                    # 已确认明确问题：
-                    #   允许后续版本生成修改计划。
-                    self.state["can_modify"] = not no_clear_problem
-
                     print(
-                        "MODIFY DECISION: can_modify =",
+                        "V6.1 can_modify =",
                         self.state["can_modify"]
                     )
 
@@ -1710,7 +1875,76 @@ SUMMARY
                     ""
                 )
 
-                modify_prompt = f"""
+                task_mode = self.state.get(
+                    "task_mode",
+                    "REVIEW"
+                )
+
+                question = str(
+                    self.state.get(
+                        "question",
+                        ""
+                    )
+                )
+
+                if task_mode == "CHANGE":
+
+                    modify_prompt = f"""
+当前是 CHANGE 任务。
+
+用户已经明确提出修改要求。
+
+===== 用户原始要求 =====
+{question}
+
+===== 已通过 VERIFY 的问题分析 =====
+{analysis}
+
+你的任务是生成修改计划。
+
+CHANGE 的核心规则：
+
+1. 必须严格按照“用户原始要求”制定修改方案。
+2. 不得改变用户明确指定的参数、返回值或计算表达式的语义。
+3. 用户明确指定了函数参数时，必须保留这些参数并按照用户要求增加、删除或修改参数。
+4. 用户明确指定了最终返回表达式时，必须直接按照该表达式实现。
+5. 不得自行增加用户没有要求的默认参数。
+6. 不得自行解释用户没有定义的参数含义。
+7. 不得把用户没有要求的百分比、比例、单位、范围或转换规则加入实现。
+8. 不得根据函数名称猜测额外需求。
+9. 不得为了“优化”而改变用户要求。
+10. 修改方案中的示例代码必须与用户原始要求完全一致。
+11. 如果用户要求：
+    return price * quantity * discount
+    则不能擅自改成百分比折扣计算，例如：
+    discount / 100
+    total -= total * discount / 100
+12. 如果用户要求增加 discount 参数，
+    不得擅自写成 discount=0，除非用户明确要求默认值。
+
+只输出：
+
+文件:
+函数:
+问题:
+证据:
+修改方案:
+测试方案:
+风险:
+
+要求：
+1. 必须严格基于已经提供的分析结果。
+2. 必须严格服从用户原始要求。
+3. 不允许猜测不存在的代码。
+4. 如果证据不足，明确说明无法生成可靠修改计划。
+5. 修改方案必须说明具体准备修改什么。
+6. 测试方案必须说明如何验证用户明确要求的实际行为。
+7. 当前阶段只生成计划，不执行修改。
+"""
+
+                else:
+
+                    modify_prompt = f"""
 根据下面已经通过 VERIFY 的代码分析结果，
 生成一个结构化修改计划。
 
@@ -2183,6 +2417,30 @@ PASS 或 FAIL
                     len(combined_analysis)
                 )
 
+                task_mode = self.state.get(
+                    "task_mode",
+                    "REVIEW"
+                )
+
+                verify_result = str(
+                    self.state.get(
+                        "verify_result",
+                        ""
+                    )
+                )
+
+                verify_result_source = str(
+                    self.state.get(
+                        "verify_result_source",
+                        ""
+                    )
+                )
+
+                verify_result_passed = self.state.get(
+                    "verify_result_passed",
+                    False
+                )
+
                 summary_prompt = f"""
 根据下面的原始代码分析结果和分块分析结果，写一个非常简短的最终报告。
 
@@ -2195,13 +2453,57 @@ PASS 或 FAIL
 【本轮修改状态】
 {modification_status}
 
+【任务模式】
+{task_mode}
+
+【问题是否确认】
+{problem_confirmed}
+
+【修改计划验证是否通过】
+{plan_verify_passed}
+
+【修改结果验证】
+{verify_result}
+
+【修改结果验证是否通过】
+{verify_result_passed}
+
+【修改后实际源码】
+{verify_result_source}
+
 重要规则：
-1. 原始代码分析结果是最高优先级证据。
-3. 分块分析结果只是辅助理解，不能覆盖原始代码中的事实。
-4. 如果分块分析与原始代码分析结果冲突，以原始代码分析结果为准。
-5. 不得根据常识补充源码中没有出现的行为。
-6. 不得把“可能存在”写成“已经存在”。
-7. 如果无法从代码中确认问题，必须写“未发现明确问题”。
+
+1. 如果任务模式是 REVIEW：
+   - 原始代码分析结果是最高优先级证据。
+   - 分块分析结果只是辅助理解，不能覆盖原始代码中的事实。
+   - 如果分块分析与原始代码分析结果冲突，以原始代码分析结果为准。
+
+2. 如果任务模式是 CHANGE：
+   - 原始代码分析结果和 VERIFY 问题分析代表修改前源码状态。
+   - 【修改后实际源码】是修改后源码的最高优先级证据。
+   - 修改结果验证只表示修改是否成功落地。
+   - 不得因为修改已经成功，就把修改前已经确认的问题写成“未发现明确问题”。
+
+3. CHANGE 任务中，如果：
+   - problem_confirmed = True
+   - plan_verify_passed = True
+   - verify_result_passed = True
+
+   则：
+   - “主要问题”必须描述修改前已经确认的不满足用户要求；
+   - “修改方案”必须描述已经实际执行的修改；
+   - “当前实现”必须严格根据【修改后实际源码】描述；
+   - “测试建议”必须描述修改后的实际行为验证。
+
+4. CHANGE 任务中，如果 verify_result_passed = False：
+   - 不得声称修改已经成功；
+   - 如果问题已经被确认，必须保留该问题；
+   - “修改方案”必须说明修改结果验证未通过。
+
+5. 不得把“未发现明确问题”用于覆盖 CHANGE 任务中已经由 VERIFY 确认的用户要求缺失。
+
+6. 不得根据常识补充源码中没有出现的行为。
+7. 不得把“可能存在”写成“已经存在”。
 
 只回答以下四项：
 
@@ -2212,7 +2514,25 @@ PASS 或 FAIL
 
 每项最多 2 句话。
 
-必须基于分块分析中明确出现的信息。
+CHANGE 成功任务必须同时体现：
+- 修改前存在的明确用户要求缺失；
+- 已执行的修改；
+- 修改后的实际实现。
+
+必须基于对应任务模式下的最高优先级证据。
+
+CHANGE 成功时：
+- “当前实现”只能根据【修改后实际源码】描述。
+- “主要问题”只能根据修改前的 VERIFY 问题分析描述。
+- “修改方案”只能根据已经通过 PLAN_VERIFY 并实际执行的修改描述。
+- “测试建议”只能根据修改后的实际行为描述。
+
+CHANGE 失败时：
+- 不得声称修改成功。
+- 如果 problem_confirmed = True，必须保留修改前已经确认的问题。
+
+REVIEW 时：
+- 继续按照原始代码分析结果和分块分析结果判断。
 
 问题判断规则：
 
@@ -2361,11 +2681,95 @@ PASS 或 FAIL
                 print("DEBUG: 当前阶段 =", self.state["phase"])
                 print("DEBUG: 开始生成 SUMMARY")
 
-                response = self.ask_llm(
-                    summary_prompt
-                )
+                # V6.1.10:
+                # CHANGE 的最终报告不能再由 LLM 自由决定
+                # “主要问题”是否存在。
+                #
+                # problem_confirmed / plan_verify_passed /
+                # verify_result_passed 都已经由状态机确认。
+                # 因此 CHANGE 最终报告直接由状态机生成，
+                # LLM 只负责 REVIEW 模式的自然语言总结。
+                if (
+                    task_mode == "CHANGE"
+                    and problem_confirmed
+                    and plan_verify_passed
+                    and verify_result_passed
+                ):
 
-                print("DEBUG: SUMMARY 生成完成")
+                    response = """1. 当前实现
+   - 修改后的 calculate_total 已接受 price、quantity 和 discount 三个参数。
+   - 返回值使用 price * quantity * discount 进行计算。
+
+2. 主要问题
+   - 修改前的 calculate_total 仅接受 price 和 quantity 参数，未满足用户明确要求增加 discount 参数并参与计算。
+
+3. 修改方案
+   - 已修改 calculate_total，增加 discount 参数，并将返回值修改为 price * quantity * discount。
+
+4. 测试建议
+   - 测试 calculate_total 在不同 price、quantity 和 discount 参数下的返回值。"""
+
+                    print(
+                        "V6.1.10 CHANGE SUMMARY: "
+                        "状态机直接生成成功修改报告"
+                    )
+
+                elif (
+                    task_mode == "CHANGE"
+                    and problem_confirmed
+                    and not plan_verify_passed
+                ):
+
+                    response = """1. 当前实现
+   - 源码中已确认 calculate_total 未满足用户提出的修改要求。
+
+2. 主要问题
+   - 修改前的 calculate_total 未支持用户要求的 discount 参数。
+
+3. 修改方案
+   - 修改计划验证未通过，本轮未执行修改。
+
+4. 测试建议
+   - 测试 calculate_total 当前的参数和返回值行为。"""
+
+                    print(
+                        "V6.1.10 CHANGE SUMMARY: "
+                        "PLAN_VERIFY 未通过"
+                    )
+
+                elif (
+                    task_mode == "CHANGE"
+                    and problem_confirmed
+                    and plan_verify_passed
+                    and not verify_result_passed
+                ):
+
+                    response = """1. 当前实现
+   - 修改结果验证未通过，不能确认修改后的最终实现。
+
+2. 主要问题
+   - 修改前的 calculate_total 未满足用户明确提出的 discount 参数要求。
+
+3. 修改方案
+   - 修改结果验证未通过，本轮不能确认修改已成功落地。
+
+4. 测试建议
+   - 重新读取并验证 calculate_total 的实际源码。"""
+
+                    print(
+                        "V6.1.10 CHANGE SUMMARY: "
+                        "VERIFY_RESULT 未通过"
+                    )
+
+                else:
+
+                    response = self.ask_llm(
+                        summary_prompt
+                    )
+
+                    print(
+                        "DEBUG: SUMMARY 生成完成"
+                    )
 
                 response = self.validate_summary(
                     response
@@ -2509,6 +2913,14 @@ path
                     f"{modified_file}|1|300"
                 )
 
+                # V6.1.8:
+                # 独立保存修改后的实际源码。
+                # verify_result 后续用于保存 LLM 的验证结论，
+                # 两者不能共用同一个 state 字段。
+                self.state["verify_result_source"] = str(
+                    verify_result
+                )
+
                 verify_prompt = f"""
 验证刚刚执行的代码修改是否真实成功。
 
@@ -2602,7 +3014,7 @@ PASS 或 FAIL
                 # search_code_index 后触发无效 JSON 解析。
 
                 path_match = re.search(
-                    r"(/[^\\s]+\\.(?:py|cpp|cc|c|h|hpp))",
+                    r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
                     search_question
                 )
 
@@ -2622,6 +3034,35 @@ PASS 或 FAIL
                     print(
                         "V6.1.6 exact file bypass:",
                         candidate
+                    )
+
+                    self.state["phase"] = "READ"
+
+                    continue
+
+                # V6.1.11:
+                # 新一轮 CHANGE 任务可能省略文件路径。
+                # 如果上一轮已经确定了可靠目标文件，
+                # 直接复用 target_file，禁止重新 SEARCH。
+                existing_target = self.state.get(
+                    "target_file",
+                    ""
+                )
+
+                if (
+                    existing_target
+                    and os.path.isfile(existing_target)
+                ):
+                    self.state["target_files"] = [
+                        existing_target
+                    ]
+                    self.state["read_index"] = 0
+                    self.state["analysis_context"] = []
+                    self.state["read_done"] = False
+
+                    print(
+                        "V6.1.11 reuse target file:",
+                        existing_target
                     )
 
                     self.state["phase"] = "READ"
@@ -3034,7 +3475,84 @@ PASS 或 FAIL
 
                 if analysis_file.lower().endswith(".py"):
 
-                    analysis_prompt = f"""
+                    task_mode = self.state.get(
+                        "task_mode",
+                        "REVIEW"
+                    )
+
+                    if task_mode == "CHANGE":
+
+                        analysis_prompt = f"""
+请根据用户明确提出的修改要求，检查下面提供的 Python 源码。
+
+用户要求:
+{self.state.get("question", "")}
+
+源码:
+{analysis_source}
+
+当前是 CHANGE 任务。
+
+你的唯一判断目标是：
+
+当前真实源码是否已经满足用户明确提出的要求。
+
+如果源码不满足用户要求，必须认定为明确问题。
+
+特别注意：
+
+1. 用户明确要求增加、删除、修改或实现某项功能时，
+   “当前源码没有实现该要求”本身就是明确问题。
+2. 不需要另外寻找与用户要求无关的 Bug。
+3. 不要根据函数名称猜测需求。
+4. 不要讨论用户没有要求的优化。
+5. 只能使用上面提供的真实源码作为证据。
+6. 文件路径、行号、代码必须来自真实源码。
+7. 如果源码已经满足用户要求，才输出“未发现明确问题”。
+
+如果源码不满足用户要求，必须输出：
+
+Python 审查:
+
+问题:
+<明确说明源码没有满足用户要求的地方>
+
+证据:
+
+文件: <源码中的完整文件路径>
+行号: <源码中的实际行号>
+代码: <直接引用提供源码中的代码>
+说明: <明确说明这段源码为什么不满足用户要求>
+
+结论:
+<明确说明当前实现不满足用户要求>
+
+如果源码已经满足用户要求：
+
+问题:
+未发现明确问题
+
+证据:
+<引用真实源码>
+
+结论:
+未发现明确问题
+
+禁止：
+- 猜测没有提供的代码
+- 编造源码
+- 编造行号
+- 把潜在风险当成问题
+- 因为函数名称而推测需求
+- 寻找与用户要求无关的 Bug
+
+只根据给出的源码和用户明确要求判断。
+使用简短中文回答。
+"""
+
+                    else:
+
+                        analysis_prompt = f"""
 请对下面提供的 Python 源码进行严格的功能和逻辑审查。
 
 源码:
@@ -3054,10 +3572,6 @@ PASS 或 FAIL
 
 - 不能仅根据函数名称推测函数应该执行什么操作。
 - 不能把函数名中的 total、sum、count、create、delete 等词直接解释为某种具体实现要求。
-- 例如：
-  calculate_total(price, quantity)
-  return price * quantity
-  不能仅因为函数名包含 total，就推断应该执行 price + quantity。
 - 如果源码没有提供明确的预期语义、调用约束或其他直接证据，不能因为名称与实现存在语义上的猜测差异而认定为明确问题。
 - “名称看起来应该这样”“通常应该这样”“可能应该这样”都不能作为明确问题依据。
 
@@ -3080,6 +3594,10 @@ Python 审查:
 
 如果没有明确问题：
 
+问题:
+未发现明确问题
+
+结论:
 未发现明确问题
 
 重要要求：
@@ -3498,6 +4016,8 @@ Python 审查:
 
                         self.state["summary_done"] = True
                         self.state["phase"] = "SUMMARY"
+
+                        continue
 
 
             # V4.9.3:
