@@ -1915,13 +1915,13 @@ FAIL
                     )
 
                     return_match = re.search(
-                        r"返回\\s+([A-Za-z0-9_*\\s]+)",
+                        r"返回\s+([A-Za-z0-9_*\s]+)",
                         question_text
                     )
 
                     if return_match:
                         required_expression = re.sub(
-                            r"\\s+",
+                            r"\s+",
                             "",
                             return_match.group(1)
                         )
@@ -1930,7 +1930,7 @@ FAIL
 
                         plan_expressions.extend(
                             re.findall(
-                                r"return\\s+([A-Za-z0-9_*\\s]+)",
+                                r"return\s+([A-Za-z0-9_*\s]+)",
                                 plan_text,
                                 re.I
                             )
@@ -1938,7 +1938,7 @@ FAIL
 
                         plan_expressions.extend(
                             re.findall(
-                                r"返回\\s+([A-Za-z0-9_*\\s]+)",
+                                r"返回\s+([A-Za-z0-9_*\s]+)",
                                 plan_text,
                                 re.I
                             )
@@ -1946,7 +1946,7 @@ FAIL
 
                         for expression in plan_expressions:
                             plan_expression = re.sub(
-                                r"\\s+",
+                                r"\s+",
                                 "",
                                 expression
                             )
@@ -2242,7 +2242,7 @@ PASS 或 FAIL
 
                 if return_match and verify_is_safe:
                     required_expression = re.sub(
-                        r"\\s+",
+                        r"\s+",
                         "",
                         return_match.group(1)
                     )
@@ -2255,7 +2255,7 @@ PASS 或 FAIL
 
                     if actual_returns:
                         actual_expression = re.sub(
-                            r"\\s+",
+                            r"\s+",
                             "",
                             actual_returns[-1]
                         )
