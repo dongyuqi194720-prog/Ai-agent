@@ -1446,7 +1446,11 @@ SUMMARY
                 evidence_source_match = False
 
                 normalized_evidence_code = "\n".join(
-                    line.strip()
+                    re.sub(
+                        r"^\s*\d+\s*:\s*",
+                        "",
+                        line
+                    ).strip()
                     for line in (
                         evidence_code
                         .replace("```python", "")
@@ -1944,11 +1948,11 @@ FAIL
                             )
                         )
 
-                        for expression in plan_expressions:
+                        if plan_expressions:
                             plan_expression = re.sub(
                                 r"\s+",
                                 "",
-                                expression
+                                plan_expressions[-1]
                             )
 
                             if (
@@ -1969,7 +1973,6 @@ FAIL
                                     "V6.4 计划:",
                                     plan_expression
                                 )
-                                break
 
                     if plan_is_safe:
                         self.state["plan_verify_passed"] = True
