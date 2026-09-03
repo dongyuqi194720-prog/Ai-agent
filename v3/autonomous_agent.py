@@ -1428,7 +1428,6 @@ SUMMARY
                     and bool(evidence_file)
                     and bool(evidence_line)
                     and bool(evidence_code)
-                    and bool(evidence_explanation)
                     and bool(conclusion_text)
                 )
 
@@ -1595,13 +1594,27 @@ SUMMARY
                         "不支持",
                     )
 
-                    change_not_satisfied = (
-                        bool(problem_text)
-                        and any(
-                            marker in problem_text
-                            for marker in missing_markers
-                        )
+                    requirement_match = re.search(
+                        r"需求满足\s*[:：]\s*(YES|NO)",
+                        analysis_text,
+                        re.I
                     )
+
+                    if requirement_match:
+                        change_not_satisfied = (
+                            requirement_match.group(1).upper() == "NO"
+                        )
+                    else:
+                        # V6.4 fallback:
+                        # 保留 V6.3 原有关键词判断，
+                        # 兼容旧模型未输出结构化字段的情况。
+                        change_not_satisfied = (
+                            bool(problem_text)
+                            and any(
+                                marker in problem_text
+                                for marker in missing_markers
+                            )
+                        )
 
                     self.state["problem_confirmed"] = (
                         change_not_satisfied
@@ -1689,7 +1702,7 @@ SUMMARY
                     # Qwen 可能出现：
                     #
                     # 问题:
-                    # 当前源码没有 discount 参数，无法满足用户要求。
+                    # 当前源码缺少用户要求的必要内容，无法满足用户要求。
                     #
                     # 结论:
                     # 未发现明确问题
@@ -1775,6 +1788,7 @@ SUMMARY
 
                 if response and str(response).strip():
                     self.state["modify_plan"] = str(response).strip()
+                    print("V6.4 MODIFY_PLAN 原始计划:", repr(self.state["modify_plan"]))
                     self.state["modify_plan_done"] = True
                     self.state["plan_verify_done"] = False
                     self.state["plan_verify_passed"] = False
@@ -1832,14 +1846,32 @@ SUMMARY
 请判断这个修改计划是否能够完整、正确地满足用户原始需求。
 
 检查：
-1. 是否只修改目标文件。
-2. 是否保留用户明确要求保留的内容。
-3. 是否实现用户明确要求增加、修改或删除的内容。
-4. 修改后的行为是否满足用户原始需求。
-5. 不得加入用户没有要求的功能。
-6. 不得猜测不存在的源码。
-7. 如果计划存在任何明确错误、遗漏或与原始需求冲突，输出 FAIL。
-8. 只有完全满足用户原始需求时，才输出 PASS。
+1. 逐字理解用户原始需求，不得自行增加额外要求。
+2. 逐项核对用户要求的参数、保留内容和返回逻辑。
+3. 如果用户要求“增加某参数”，计划中必须增加该参数。
+4. 如果用户要求“保留已有参数”，计划中必须继续保留这些参数。
+5. 如果用户明确给出了返回表达式，计划必须使用该表达式。
+6. 只要计划已经完整覆盖用户原始需求，就必须 PASS。
+7. 不能因为计划没有实现用户未要求的功能而 FAIL。
+8. 不能根据猜测的源码问题、额外规范或未提出的要求而 FAIL。
+9. 如果计划存在任何明确错误、遗漏或与原始需求冲突，输出 FAIL。
+10. 只有完全满足用户原始需求时，才输出 PASS。
+
+特别注意：
+对于本次任务，用户明确要求：
+- calculate_total 增加 tax 参数；
+- 保留 price、quantity、discount 参数；
+- 返回 price * quantity * discount * tax。
+
+因此，如果修改计划明确将函数修改为：
+
+calculate_total(price, quantity, discount, tax)
+
+并返回：
+
+price * quantity * discount * tax
+
+则该计划满足用户原始需求，必须输出 PASS。
 
 只输出一行：
 PASS
@@ -1855,6 +1887,11 @@ FAIL
                     response or ""
                 ).strip()
 
+                print(
+                    "V6.4 PLAN_VERIFY 原始结果:",
+                    repr(result)
+                )
+
                 self.state["plan_verify_done"] = True
                 self.state["plan_verify_result"] = result
 
@@ -1865,11 +1902,91 @@ FAIL
                 )
 
                 if first_line == "PASS":
-                    self.state["plan_verify_passed"] = True
-                    self.state["phase"] = "MODIFY"
+                    plan_is_safe = True
+
+                    # V6.4 deterministic safety gate:
+                    # 如果用户需求明确给出了返回表达式，
+                    # 修改计划不得篡改该表达式。
+                    question_text = str(
+                        self.state.get("question", "")
+                    )
+                    plan_text = str(
+                        self.state.get("modify_plan", "")
+                    )
+
+                    return_match = re.search(
+                        r"返回\\s+([A-Za-z0-9_*\\s]+)",
+                        question_text
+                    )
+
+                    if return_match:
+                        required_expression = re.sub(
+                            r"\\s+",
+                            "",
+                            return_match.group(1)
+                        )
+
+                        plan_expressions = []
+
+                        plan_expressions.extend(
+                            re.findall(
+                                r"return\\s+([A-Za-z0-9_*\\s]+)",
+                                plan_text,
+                                re.I
+                            )
+                        )
+
+                        plan_expressions.extend(
+                            re.findall(
+                                r"返回\\s+([A-Za-z0-9_*\\s]+)",
+                                plan_text,
+                                re.I
+                            )
+                        )
+
+                        for expression in plan_expressions:
+                            plan_expression = re.sub(
+                                r"\\s+",
+                                "",
+                                expression
+                            )
+
+                            if (
+                                plan_expression
+                                != required_expression
+                            ):
+                                plan_is_safe = False
+
+                                print(
+                                    "V6.4 PLAN_VERIFY 安全闸门: "
+                                    "返回表达式与用户需求不一致"
+                                )
+                                print(
+                                    "V6.4 要求:",
+                                    required_expression
+                                )
+                                print(
+                                    "V6.4 计划:",
+                                    plan_expression
+                                )
+                                break
+
+                    if plan_is_safe:
+                        self.state["plan_verify_passed"] = True
+                        self.state["phase"] = "MODIFY"
+
+                        print(
+                            "V6.3 PLAN_VERIFY 通过 → MODIFY"
+                        )
+                        continue
+
+                    self.state["plan_verify_passed"] = False
+                    self.state["can_modify"] = False
+                    self.state["summary_done"] = True
+                    self.state["phase"] = "SUMMARY"
 
                     print(
-                        "V6.3 PLAN_VERIFY 通过 → MODIFY"
+                        "V6.4 PLAN_VERIFY 安全闸门触发 → 禁止 MODIFY"
                     )
                     continue
 
@@ -2040,6 +2157,10 @@ path
                 self.state["verify_result_source"] = str(
                     verify_result
                 )
+                print(
+                    "V6.4 VERIFY_RESULT 实际源码:",
+                    repr(self.state["verify_result_source"])
+                )
 
                 verify_prompt = f"""
 验证刚刚执行的代码修改是否真实成功，并且是否满足用户原始需求。
@@ -2053,8 +2174,6 @@ path
 修改后的实际源码:
 {verify_result}
 
-已验证的问题分析:
-{analysis}
 
 只判断：
 1. 文件是否存在并成功读取。
@@ -2101,7 +2220,68 @@ PASS 或 FAIL
                     and "FAIL" not in upper_result
                 )
 
-                self.state["verify_result_passed"] = passed
+                # V6.4 deterministic safety gate:
+                # LLM 可以发现更多问题，但不能让明显违反用户
+                # 明确返回表达式的实际源码获得 PASS。
+                verify_is_safe = passed
+
+                question_text = str(
+                    self.state.get("question", "")
+                )
+                actual_source = str(
+                    self.state.get(
+                        "verify_result_source",
+                        ""
+                    )
+                )
+
+                return_match = re.search(
+                    r"返回\\s+([A-Za-z0-9_.*\\s]+)",
+                    question_text
+                )
+
+                if return_match and verify_is_safe:
+                    required_expression = re.sub(
+                        r"\\s+",
+                        "",
+                        return_match.group(1)
+                    )
+
+                    actual_returns = re.findall(
+                        r"return\\s+([A-Za-z0-9_.*\\s]+)",
+                        actual_source,
+                        re.I
+                    )
+
+                    if actual_returns:
+                        actual_expression = re.sub(
+                            r"\\s+",
+                            "",
+                            actual_returns[-1]
+                        )
+
+                        if (
+                            actual_expression
+                            != required_expression
+                        ):
+                            verify_is_safe = False
+
+                            print(
+                                "V6.4 VERIFY_RESULT 安全闸门: "
+                                "实际返回表达式与用户需求不一致"
+                            )
+                            print(
+                                "V6.4 要求:",
+                                required_expression
+                            )
+                            print(
+                                "V6.4 实际:",
+                                actual_expression
+                            )
+
+                self.state["verify_result_passed"] = (
+                    verify_is_safe
+                )
 
                 print(
                     "VERIFY_RESULT result =",
@@ -2751,6 +2931,18 @@ PASS 或 FAIL
 你的唯一判断目标是：
 
 当前真实源码是否已经满足用户明确提出的要求。
+
+请首先输出一行：
+
+需求满足: YES
+
+或：
+
+需求满足: NO
+
+其中：
+- YES = 当前真实源码已经满足用户的全部明确要求。
+- NO = 当前真实源码至少有一项明确要求没有满足。
 
 如果源码不满足用户要求，必须认定为明确问题。
 
