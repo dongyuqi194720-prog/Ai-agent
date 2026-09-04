@@ -71,6 +71,11 @@ class AutonomousAgent:
 
             "codex_analyze_done": False,
 
+            "codex_request": "",
+            "codex_response": "",
+            "waiting_codex": False,
+
+
             "verify_done": False,
 
             "summary_done": False,
@@ -141,47 +146,99 @@ class AutonomousAgent:
         )
 
 
+    def resume_after_codex(
+        self,
+        response
+    ):
+        """
+        普通 Codex 回复进入 V6 后，
+        在现有状态上恢复执行。
+        """
+
+        if str(
+            self.state.get("phase", "")
+        ).upper() != "WAIT_CODEX":
+            raise RuntimeError(
+                "当前状态不是 WAIT_CODEX"
+            )
+
+        parsed = self.submit_codex_response(
+            response
+        )
+
+        if not self.state.get(
+            "codex_analyze_done",
+            False
+        ):
+            raise RuntimeError(
+                "Codex 回复为空，无法恢复"
+            )
+
+        return self.run(
+            resume=True
+        )
+
+
+    def submit_codex_response(
+        self,
+        response
+    ):
+        """
+        普通 Codex 聊天 -> V6 信息桥。
+        只接收和标准化分析结果，不执行任何操作。
+        """
+
+        parsed = self.codex.parse_response(
+            response
+        )
+
+        self.state["codex_analysis"] = (
+            parsed.get("analysis", "")
+        )
+
+        self.state["codex_analyze_done"] = bool(
+            self.state["codex_analysis"]
+        )
+
+        self.state["analysis"] = (
+            self.state["codex_analysis"]
+        )
+        self.state["analysis_result"] = (
+            self.state["codex_analysis"]
+        )
+
+        if self.state["codex_analyze_done"]:
+            self.state["codex_response"] = str(
+                response
+            )
+            self.state["waiting_codex"] = False
+            self.state["analyze_done"] = True
+            self.state["phase"] = "VERIFY"
+
+        return parsed
+
 
     def ask_codex(
         self,
         prompt
     ):
+        """
+        V6.8 信息桥：
+        不自动调用 Codex CLI。
+        只生成交给普通 Codex 聊天的请求。
+        """
 
-        # V5.3:
-        # 独立 Codex 推理通道。
-        # 不修改 V4 原有 ask_llm()。
-        print(
-            "V5.3 CODEX CALL START:",
-            "input_chars =",
-            len(str(prompt))
-        )
-
-        try:
-
-            result = self.codex.ask(
-                prompt
-            )
-
-        except Exception as e:
-
-            # V5.8:
-            # Codex 是独立第二意见。
-            # Codex 失败时不得阻断 V4 主流程。
-            print(
-                "V5.8 CODEX CALL FAILED:",
-                type(e).__name__,
-                str(e)
-            )
-
-            return ""
+        request = str(prompt).strip()
 
         print(
-            "V5.3 CODEX CALL END:",
-            "output_chars =",
-            len(str(result))
+            "\n========== CODEX REQUEST BEGIN =========="
+        )
+        print(request)
+        print(
+            "=========== CODEX REQUEST END ==========="
         )
 
-        return result
+        return request
 
 
     def ask_llm(
@@ -1487,17 +1544,25 @@ SUMMARY
 
     def run(
         self,
-        question
+        question=None,
+        resume=False
     ):
 
         # V6.1.7:
-        # 每次 run() 都从干净状态开始。
-        # 防止上一个任务的状态污染新任务。
-        self.state = copy.deepcopy(
-            self._initial_state
-        )
+        # 新任务从干净状态开始。
+        # Codex 恢复模式保留现有 state。
+        if not resume:
+            self.state = copy.deepcopy(
+                self._initial_state
+            )
 
-        self.state["question"] = question
+            self.state["question"] = question
+
+        if resume and question is None:
+            question = self.state.get(
+                "question",
+                ""
+            )
 
         change_keywords = [
             "修改",
@@ -1955,7 +2020,7 @@ SUMMARY
                 # CHANGE 任务中，如果 LLM 引用的代码无法与真实源码匹配，
                 # 禁止进入 MODIFY，直接进入安全 SUMMARY。
                 if (
-                    task_mode == "CHANGE"
+                    self.state.get("task_mode", "") == "CHANGE"
                     and not evidence_source_match
                 ):
                     print(
@@ -2949,6 +3014,12 @@ PASS 或 FAIL
                 break
 
 
+            print(
+                "V6 DEBUG BEFORE LLM:",
+                "phase =", self.state.get("phase"),
+                "prompt_chars =", len(str(prompt))
+            )
+
             response = self.ask_llm(
                 prompt
             )
@@ -3776,51 +3847,40 @@ Python 审查:
 只根据给出的源码判断，不要猜测没有提供的代码。
 """
 
-                analysis_result = self.ask_llm(
+                # V6.8：
+                # 生成普通 Codex 聊天请求。
+                # 不自动调用 Codex。
+                # 等待普通 Codex 返回分析结果。
+                codex_request = self.ask_codex(
                     analysis_prompt
                 )
 
+                self.state["codex_request"] = (
+                    codex_request
+                )
+                self.state["waiting_codex"] = True
+                self.state["phase"] = "WAIT_CODEX"
 
                 print(
-                "DEBUG: LLM分析完成，长度=",
-                len(str(analysis_result))
+                    "V6.8 WAIT_CODEX:",
+                    "request_chars =",
+                    len(str(codex_request))
                 )
 
+                codex_response = self.codex.ask(
+                    codex_request
+                )
 
-                self.state["analysis_result"] = analysis_result
+                self.state["codex_response"] = (
+                    str(codex_response)
+                )
 
+                self.state["waiting_codex"] = False
 
-                # V5.4:
-                # 在 V4 原有 Qwen 分析完成后，
-                # 使用同一份 analysis_source 交给 Codex。
-                #
-                # Codex 是独立第二分析通道：
-                # 1. 不覆盖 analysis_result
-                # 2. 不修改 V4 ask_llm()
-                # 3. 不调用工具
-                # 4. 不修改代码
-                #
-                # 当前阶段只保存 Codex 独立分析结果，
-                # 暂不让 Codex 改变状态机判断。
+                return self.resume_after_codex(
+                    codex_response
+                )
 
-                # V6.1：
-                # Qwen 分析完成后，使用同一份 analysis_prompt
-                # 交给 Codex 做独立第二分析。
-                #
-                # Codex 失败时 ask_codex() 返回空字符串，
-                # 不阻断 V4 主流程。
-
-                # V6 当前阶段：
-                # Codex 尚未接入运行流程。
-                # 保留状态字段，但不调用 Codex。
-                self.state["codex_analysis"] = ""
-                self.state["codex_analyze_done"] = False
-
-
-                self.state["analyze_done"] = True
-                self.state["verify_done"] = False
-
-                # V6.6:
                 # ANALYZE 完成后建立 GPT Decision Request。
                 # 当前只保存请求，不调用 GPT，
                 # 不改变现有 VERIFY → MODIFY 流程。

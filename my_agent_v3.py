@@ -181,6 +181,25 @@ while True:
 
 
 
-    agent.run(
+    result = agent.run(
         question
     )
+
+    # V6.8：普通 Codex 聊天人工接力。
+    if isinstance(result, dict) and result.get("waiting_codex"):
+        print()
+        print("========== 普通 Codex 请求 ==========")
+        print(result.get("codex_request", ""))
+        print("========== END CODEX REQUEST ==========")
+        print()
+        print("请把普通 Codex 的回复粘贴到下面：")
+
+        codex_response = input().strip()
+
+        if codex_response:
+            print("V6.8: 收到 Codex 回复，正在恢复...")
+            result = agent.resume_after_codex(
+                codex_response
+            )
+            print("V6.8: Codex 恢复完成")
+
