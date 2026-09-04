@@ -1153,8 +1153,16 @@ class AutonomousAgent:
             ):
                 path = lines[1].strip()
 
+                file_lines = lines[2:]
+
+                if (
+                    file_lines
+                    and file_lines[-1].strip().lower() == "</write_file>"
+                ):
+                    file_lines = file_lines[:-1]
+
                 file_content = "\n".join(
-                    lines[2:]
+                    file_lines
                 )
 
                 if not path.startswith("/"):
