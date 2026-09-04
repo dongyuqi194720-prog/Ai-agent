@@ -13,10 +13,20 @@ class AutonomousAgent:
         self,
         llm,
         router,
-        project=None
+        project=None,
+        decision_llm=None
     ):
 
         self.llm = llm
+
+        # V6.7:
+        # Decision Layer 独立推理通道。
+        # 未提供时继续使用原有 self.llm，保持 V6.6 行为不变。
+        self.decision_llm = (
+            decision_llm
+            if decision_llm is not None
+            else self.llm
+        )
 
         # V5.3:
         # 保留 V4 原有 self.llm。
@@ -176,7 +186,8 @@ class AutonomousAgent:
 
     def ask_llm(
         self,
-        prompt
+        prompt,
+        llm=None
     ):
 
         import time
@@ -197,6 +208,9 @@ class AutonomousAgent:
 
         LLM_TIMEOUT = 600
 
+        if llm is None:
+            llm = self.llm
+
         start_time = time.time()
 
         print(
@@ -216,7 +230,7 @@ class AutonomousAgent:
 
             try:
 
-                response = self.llm.invoke(
+                response = llm.invoke(
                     prompt
                 )
 
@@ -465,7 +479,8 @@ class AutonomousAgent:
         )
 
         return self.ask_llm(
-            decision_prompt
+            decision_prompt,
+            llm=self.decision_llm
         )
 
     def decision_step(
