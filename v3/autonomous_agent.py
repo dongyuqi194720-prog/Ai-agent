@@ -99,7 +99,14 @@ class AutonomousAgent:
             # V4.9.7:
             # VERIFY 证据不足时允许重新 SEARCH。
             # 防止证据不足导致无限循环。
-            "verify_retry_count": 0
+            "verify_retry_count": 0,
+
+            # V6.6:
+            # GPT Decision Loop 协议状态。
+            # 当前只保存请求和解析后的 ACTION，
+            # 不改变现有 V6.5 状态机。
+            "decision_request": "",
+            "last_action": "",
         }
          
 
@@ -300,6 +307,356 @@ class AutonomousAgent:
         return str(result)
 
 
+
+    def parse_action(
+        self,
+        response
+    ):
+        """
+        V6.6 ACTION 协议解析器。
+        当前只负责解析，不驱动状态机。
+        """
+
+        text = str(response).strip()
+
+        action_match = re.search(
+            r"^\s*ACTION\s*:\s*([A-Z_]+)",
+            text,
+            re.I | re.M
+        )
+
+        reason_match = re.search(
+            r"^\s*REASON\s*:\s*(.+)$",
+            text,
+            re.I | re.M
+        )
+
+        action = (
+            action_match.group(1).upper()
+            if action_match
+            else ""
+        )
+
+        reason = (
+            reason_match.group(1).strip()
+            if reason_match
+            else ""
+        )
+
+        return {
+            "action": action,
+            "reason": reason
+        }
+
+
+    def build_decision_request(
+        self,
+        observation=""
+    ):
+        """
+        V6.6 GPT Decision Request。
+
+        V6 提供真实任务、当前状态、源码上下文和最近结果。
+        GPT 只负责分析并返回 ACTION。
+        当前版本只生成协议，不改变现有状态机。
+        """
+
+        state = self.state
+
+        request = {
+            "TASK": str(state.get("question", "")),
+            "CURRENT_STATE": {
+                "phase": state.get("phase", ""),
+                "task_mode": state.get("task_mode", ""),
+                "target_file": state.get("target_file"),
+                "target_files": state.get("target_files", []),
+                "read_done": state.get("read_done", False),
+                "analyze_done": state.get("analyze_done", False),
+                "problem_confirmed": state.get("problem_confirmed", False),
+                "verify_done": state.get("verify_done", False),
+                "modify_plan_done": state.get("modify_plan_done", False),
+                "plan_verify_passed": state.get("plan_verify_passed", False),
+                "verify_result_done": state.get("verify_result_done", False),
+                "verify_result_passed": state.get("verify_result_passed", False),
+            },
+            "SOURCE": state.get("analysis_context", []),
+            "ANALYSIS": state.get("analysis_result", ""),
+            "MODIFY_PLAN": state.get("modify_plan", ""),
+            "VERIFY_RESULT": state.get("verify_result", ""),
+            "LAST_RESULT": str(observation),
+            "DECISION_PROTOCOL": {
+                "required_output": "ACTION: <ACTION>\\nREASON: <reason>",
+                "allowed_actions": [
+                    "SEARCH",
+                    "READ",
+                    "ANALYZE",
+                    "VERIFY",
+                    "MODIFY_PLAN",
+                    "PLAN_VERIFY",
+                    "MODIFY",
+                    "TEST",
+                    "BUILD",
+                    "VERIFY_RESULT",
+                    "DONE",
+                    "FINISH"
+                ],
+                "instruction": (
+                    "你现在是 GPT Decision Layer，只负责决定下一步 ACTION。"
+                    "不要输出工具调用，不要输出代码，不要输出解释性正文。"
+                    "必须严格输出两行："
+                    "第一行 ACTION: <一个允许的 ACTION>"
+                    "第二行 REASON: <简短原因>"
+                    "ACTION 必须来自 allowed_actions。"
+                    "根据 CURRENT_STATE 和 LAST_RESULT 决定下一步动作。"
+                )
+            },
+        }
+
+        return json.dumps(
+            request,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+    def ask_decision(
+        self,
+        decision_request
+    ):
+        """
+        V6.6 独立 Decision Call。
+        Decision Layer 只负责返回 ACTION / REASON。
+        """
+
+        phase = str(
+            self.state.get("phase", "")
+        ).strip().upper()
+
+        phase_next_action = {
+            "SEARCH": "SEARCH 或 READ",
+            "READ": "READ 或 ANALYZE",
+            "ANALYZE": "VERIFY",
+            "VERIFY": "MODIFY_PLAN",
+            "MODIFY_PLAN": "PLAN_VERIFY",
+            "PLAN_VERIFY": "MODIFY",
+            "MODIFY": "VERIFY_RESULT",
+            "VERIFY_RESULT": "DONE 或 FINISH",
+            "SUMMARY": "DONE 或 FINISH",
+        }.get(
+            phase,
+            ""
+        )
+
+        decision_prompt = (
+            "你是 V6.6 GPT Decision Layer。\\n"
+            "只负责决定下一步 ACTION。\\n"
+            "不要调用工具。\\n"
+            "不要输出代码。\\n"
+            "不要输出解释性正文。\\n"
+            "当前阶段: " + phase + "\\n"
+            "当前阶段允许的下一步 ACTION: "
+            + phase_next_action + "\\n"
+            "必须从当前阶段允许的 ACTION 中选择，"
+            "禁止选择其他阶段的 ACTION。\\n"
+            "严格输出两行：\\n"
+            "ACTION: <一个允许的 ACTION>\\n"
+            "REASON: <简短原因>\\n\\n"
+            + str(decision_request)
+        )
+
+        return self.ask_llm(
+            decision_prompt
+        )
+
+    def decision_step(
+        self,
+        response
+    ):
+        """
+        V6.6 GPT Decision Step。
+
+        将 GPT 返回文本转换为 ACTION，
+        再交给 V6 安全验证器。
+
+        当前版本只负责解析和验证，
+        不直接执行工具。
+        """
+
+        action_data = self.parse_action(
+            response
+        )
+
+        validation = self.validate_action(
+            action_data
+        )
+
+        result = {
+            "action": action_data.get(
+                "action",
+                ""
+            ),
+            "reason": action_data.get(
+                "reason",
+                ""
+            ),
+            "allowed": validation.get(
+                "allowed",
+                False
+            ),
+            "validation_reason": validation.get(
+                "reason",
+                ""
+            )
+        }
+
+        self.state["last_action"] = (
+            result["action"]
+        )
+
+        return result
+
+    def build_result(
+        self,
+        action,
+        success,
+        output="",
+        error=""
+    ):
+        """
+        V6.6 RESULT 协议。
+
+        V6 执行完成后，把结果标准化。
+        后续可直接发送给 GPT 决策层。
+        """
+
+        result = {
+            "ACTION": str(action).strip().upper(),
+            "SUCCESS": bool(success),
+            "OUTPUT": str(output),
+            "ERROR": str(error),
+            "STATE": {
+                "phase": self.state.get("phase", ""),
+                "target_file": self.state.get(
+                    "target_file"
+                ),
+                "modify_done": self.state.get(
+                    "modified_file"
+                ) is not None,
+                "verify_result_passed": self.state.get(
+                    "verify_result_passed",
+                    False
+                )
+            }
+        }
+
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    def validate_action(
+        self,
+        action_data
+    ):
+        """
+        V6.6 ACTION 安全验证器。
+
+        GPT 只负责提出 ACTION。
+        V6 负责判断 ACTION 是否允许。
+        当前版本只验证，不执行。
+        """
+
+        if not isinstance(action_data, dict):
+            return {
+                "allowed": False,
+                "reason": "ACTION 数据格式无效"
+            }
+
+        action = str(
+            action_data.get("action", "")
+        ).strip().upper()
+
+        allowed_actions = {
+            "SEARCH",
+            "READ",
+            "ANALYZE",
+            "VERIFY",
+            "MODIFY_PLAN",
+            "PLAN_VERIFY",
+            "MODIFY",
+            "TEST",
+            "BUILD",
+            "VERIFY_RESULT",
+            "DONE",
+            "FINISH"
+        }
+
+        if action not in allowed_actions:
+            return {
+                "allowed": False,
+                "action": action,
+                "reason": "ACTION 不在允许列表"
+            }
+
+        phase = str(
+            self.state.get("phase", "")
+        ).strip().upper()
+
+        phase_actions = {
+            "SEARCH": {"SEARCH", "READ"},
+            "READ": {"READ", "ANALYZE"},
+            "ANALYZE": {"VERIFY"},
+            "VERIFY": {"MODIFY_PLAN"},
+            "MODIFY_PLAN": {"PLAN_VERIFY"},
+            "PLAN_VERIFY": {"MODIFY"},
+            "MODIFY": {"VERIFY_RESULT"},
+            "VERIFY_RESULT": {"DONE", "FINISH"},
+            "SUMMARY": {"DONE", "FINISH"},
+        }
+
+        allowed_for_phase = phase_actions.get(
+            phase,
+            set()
+        )
+
+        if action not in allowed_for_phase:
+            return {
+                "allowed": False,
+                "action": action,
+                "reason": (
+                    "当前阶段 "
+                    + phase
+                    + " 不允许 ACTION: "
+                    + action
+                )
+            }
+
+        if action == "MODIFY":
+            if not self.state.get("target_file"):
+                return {
+                    "allowed": False,
+                    "action": action,
+                    "reason": "MODIFY 缺少目标文件"
+                }
+
+            if not self.state.get(
+                "plan_verify_passed",
+                False
+            ):
+                return {
+                    "allowed": False,
+                    "action": action,
+                    "reason": "PLAN_VERIFY 未通过"
+                }
+
+        return {
+            "allowed": True,
+            "action": action,
+            "reason": str(
+                action_data.get("reason", "")
+            ).strip()
+        }
 
     def validate_summary(
         self,
@@ -841,7 +1198,21 @@ class AutonomousAgent:
                 lines[1:]
             )
 
-            if not path.startswith("/"):
+            # V6.6: MODIFY 阶段目标文件由状态机决定。
+            # 模型输出的路径只作为候选，禁止让模型控制实际写入目标。
+            target_file = self.state.get("target_file")
+
+            if target_file:
+                if path != target_file:
+                    print(
+                        "V6.6 MODIFY 目标文件纠正:",
+                        path,
+                        "->",
+                        target_file
+                    )
+                path = target_file
+
+            elif not path.startswith("/"):
                 print(
                     "V6.1 write_file 拒绝：路径不是绝对路径:",
                     path
@@ -1158,6 +1529,21 @@ SUMMARY
                 question,
                 observation
             )
+
+            # V6.6:
+            # 将标准 Decision Request 注入当前 LLM 请求。
+            # 不修改原有 V6.5 状态机 Prompt。
+            decision_request = self.state.get(
+                "decision_request",
+                ""
+            )
+
+            if decision_request:
+                prompt += (
+                    "\n\n========== V6.6 GPT DECISION REQUEST ==========\n"
+                    + decision_request
+                    + "\n========== END V6.6 GPT DECISION REQUEST ==========\n"
+                )
 
 
             # V4.10.4:
@@ -1725,9 +2111,57 @@ SUMMARY
                         and self.state.get("problem_confirmed", False)
                         and self.state.get("can_modify", False)
                     ):
-                        self.state["phase"] = "MODIFY_PLAN"
+                        # V6.6：VERIFY 完成后由 GPT Decision Layer
+                        # 决定是否进入 MODIFY_PLAN。
+                        self.state["phase"] = "VERIFY"
+
+                        self.state["decision_request"] = (
+                            self.build_decision_request(
+                                observation
+                            )
+                        )
+
+                        decision_response = self.ask_decision(
+                            self.state["decision_request"]
+                        )
+
+                        decision = self.decision_step(
+                            decision_response
+                        )
+
                         print(
-                            "V6.3 VERIFY: CHANGE 问题已确认，进入 MODIFY_PLAN"
+                            "V6.6 VERIFY GPT Decision:",
+                            decision
+                        )
+
+                        if not decision.get("allowed", False):
+                            print(
+                                "V6.6 VERIFY ACTION 被拒绝:",
+                                decision.get(
+                                    "validation_reason",
+                                    ""
+                                )
+                            )
+                            self.state["can_modify"] = False
+                            self.state["summary_done"] = True
+                            self.state["phase"] = "SUMMARY"
+                            continue
+
+                        if decision.get("action") != "MODIFY_PLAN":
+                            print(
+                                "V6.6 VERIFY ACTION 与当前阶段预期不一致:",
+                                decision.get("action"),
+                                "!= MODIFY_PLAN"
+                            )
+                            self.state["can_modify"] = False
+                            self.state["summary_done"] = True
+                            self.state["phase"] = "SUMMARY"
+                            continue
+
+                        self.state["phase"] = "MODIFY_PLAN"
+
+                        print(
+                            "V6.6 VERIFY: GPT 已确认进入 MODIFY_PLAN"
                         )
                         continue
 
@@ -1919,7 +2353,7 @@ FAIL
                     )
 
                     return_match = re.search(
-                        r"返回\s+([A-Za-z0-9_*\s]+)",
+                        r"返回\s+([A-Za-z0-9_* ]+)",
                         question_text
                     )
 
@@ -1934,7 +2368,7 @@ FAIL
 
                         plan_expressions.extend(
                             re.findall(
-                                r"return\s+([A-Za-z0-9_*\s]+)",
+                                r"return\s+([A-Za-z0-9_* ]+)",
                                 plan_text,
                                 re.I
                             )
@@ -1942,7 +2376,7 @@ FAIL
 
                         plan_expressions.extend(
                             re.findall(
-                                r"返回\s+([A-Za-z0-9_*\s]+)",
+                                r"返回[ \t]+([A-Za-z0-9_* \t]+)",
                                 plan_text,
                                 re.I
                             )
@@ -1976,10 +2410,83 @@ FAIL
 
                     if plan_is_safe:
                         self.state["plan_verify_passed"] = True
+
+                        # V6.6：PLAN_VERIFY 确定性安全检查通过后，
+                        # 再由 GPT Decision Layer 决定是否执行 MODIFY。
+                        self.state["phase"] = "PLAN_VERIFY"
+
+                        self.state["decision_request"] = (
+                            self.build_decision_request(
+                                observation
+                            )
+                        )
+
+                        decision_response = self.ask_decision(
+                            self.state["decision_request"]
+                        )
+
+                        decision = self.decision_step(
+                            decision_response
+                        )
+
+                        print(
+                            "V6.6 PLAN_VERIFY GPT Decision:",
+                            decision
+                        )
+
+                        if (
+                            decision.get("action") != "MODIFY"
+                        ):
+                            print(
+                                "V6.6 PLAN_VERIFY GPT 首次决策不是 MODIFY，进行一次纠正决策"
+                            )
+
+                            retry_prompt = (
+                                "PLAN_VERIFY 已经通过确定性安全检查。\\n"
+                                "当前阶段就是 PLAN_VERIFY。\\n"
+                                "下一步唯一允许的 ACTION 是 MODIFY。\\n"
+                                "请不要选择 MODIFY_PLAN。\\n"
+                                "严格输出：\\n"
+                                "ACTION: MODIFY\\n"
+                                "REASON: 简短原因"
+                            )
+
+                            retry_response = self.ask_decision(
+                                retry_prompt
+                            )
+
+                            decision = self.decision_step(
+                                retry_response
+                            )
+
+                            print(
+                                "V6.6 PLAN_VERIFY GPT Retry Decision:",
+                                decision
+                            )
+
+                        if (
+                            not decision.get("allowed", False)
+                            or decision.get("action") != "MODIFY"
+                        ):
+                            print(
+                                "V6.6 PLAN_VERIFY GPT 最终未确认 MODIFY"
+                            )
+                            self.state["can_modify"] = False
+                            self.state["summary_done"] = True
+                            self.state["phase"] = "SUMMARY"
+                            continue
+
                         self.state["phase"] = "MODIFY"
 
                         print(
-                            "V6.3 PLAN_VERIFY 通过 → MODIFY"
+                            "V6.6 PLAN_VERIFY 通过 + GPT 已确认 → MODIFY"
+                        )
+                        continue
+
+                        self.state["phase"] = "MODIFY"
+
+                        print(
+                            "V6.6 PLAN_VERIFY 通过 + GPT 已确认 → MODIFY"
                         )
                         continue
 
@@ -2426,6 +2933,44 @@ PASS 或 FAIL
 
             print(response)
 
+            # V6.6:
+            # GPT Decision Protocol。
+            # 如果外部提供 GPT ACTION，则先经过 V6 安全验证。
+            # 当前不改变既有状态机执行逻辑。
+            decision = self.decision_step(
+                response
+            )
+
+            self.state["last_action"] = decision.get(
+                "action",
+                ""
+            )
+
+            print(
+                "V6.6 Decision:",
+                decision
+            )
+
+            # V6.6 ANALYZE Decision Gate:
+            # GPT 决定 VERIFY 后，立即切换状态并结束本轮。
+            # 防止旧版 V4.3.4 强制 analyze_code 再次接管控制流。
+            if (
+                self.state["phase"] == "ANALYZE"
+                and decision.get("allowed", False)
+            ):
+                if decision.get("action") == "VERIFY":
+                    self.state["phase"] = "VERIFY"
+                    print(
+                        "V6.6 ANALYZE: GPT 已确认进入 VERIFY"
+                    )
+                    continue
+
+                print(
+                    "V6.6 ANALYZE ACTION 被拒绝:",
+                    decision.get("validation_reason", "")
+                )
+                continue
+
 
             tool, args = self.extract_tool(
                 response
@@ -2663,7 +3208,20 @@ PASS 或 FAIL
                             "V5.18: 没有有效 target_file，拒绝本次读取"
                         )
 
-                        continue
+                        # V6.6: READ 结果进入下一轮 GPT Decision Request
+                self.state["decision_request"] = (
+                    self.build_decision_request(
+                        observation
+                    )
+                )
+
+                print(
+                    "V6.6 READ Decision Request 已刷新:",
+                    len(self.state["decision_request"]),
+                    "chars"
+                )
+
+                continue
 
             # V4.9.2：
             # READ 阶段允许连续读取多个候选文件。
@@ -2672,6 +3230,46 @@ PASS 或 FAIL
             result = self.controller.call(
                 tool,
                 args
+            )
+
+            # V6.6:
+            # 工具真实执行完成后建立标准 RESULT。
+            # RESULT 只记录真实执行结果，不改变现有状态机。
+            result_success = result is not None
+
+            self.state["last_result"] = (
+                self.build_result(
+                    tool,
+                    result_success,
+                    output=result if result_success else "",
+                    error="" if result_success else "工具执行返回空结果"
+                )
+            )
+
+            print(
+                "V6.6 RESULT 已生成:",
+                len(self.state["last_result"]),
+                "chars"
+            )
+
+            # V6.6:
+            # 工具真实执行完成后建立标准 RESULT。
+            # RESULT 只记录真实执行结果，不改变现有状态机。
+            result_success = result is not None
+
+            self.state["last_result"] = (
+                self.build_result(
+                    tool,
+                    result_success,
+                    output=result if result_success else "",
+                    error="" if result_success else "工具执行返回空结果"
+                )
+            )
+
+            print(
+                "V6.6 RESULT 已生成:",
+                len(self.state["last_result"]),
+                "chars"
             )
 
             print("DEBUG tool returned:", type(result))
@@ -3199,12 +3797,64 @@ Python 审查:
                 self.state["analyze_done"] = True
                 self.state["verify_done"] = False
 
+                # V6.6:
+                # ANALYZE 完成后建立 GPT Decision Request。
+                # 当前只保存请求，不调用 GPT，
+                # 不改变现有 VERIFY → MODIFY 流程。
+                self.state["decision_request"] = (
+                    self.build_decision_request(
+                        observation
+                    )
+                )
+
+                print(
+                    "V6.6 Decision Request 已生成:",
+                    len(
+                        self.state["decision_request"]
+                    ),
+                    "chars"
+                )
+
+                # V6.6：第一次真正独立调用 Decision Layer。
+                decision_response = self.ask_decision(
+                    self.state["decision_request"]
+                )
+
+                decision = self.decision_step(
+                    decision_response
+                )
+
+                print(
+                    "V6.6 GPT Decision:",
+                    decision
+                )
+
+                # V6.6：ACTION 正式成为状态推进门控。
+                # ANALYZE 阶段只能接受 VERIFY。
+                if not decision.get("allowed", False):
+                    print(
+                        "V6.6 ACTION 被拒绝:",
+                        decision.get("validation_reason", "")
+                    )
+                    self.state["summary_done"] = False
+                    self.state["phase"] = "ANALYZE"
+                    continue
+
+                if decision.get("action") != "VERIFY":
+                    print(
+                        "V6.6 ACTION 与当前阶段预期不一致:",
+                        decision.get("action"),
+                        "!= VERIFY"
+                    )
+                    self.state["summary_done"] = False
+                    self.state["phase"] = "ANALYZE"
+                    continue
+
                 print("========== VERIFY 阶段 ==========")
 
-                # V4.5.1:
-                # 先建立独立 VERIFY 状态。
-                # 当前版本暂不增加新的工具调用，
-                # 只验证状态机能够稳定经过 VERIFY。
+                # V6.6：
+                # GPT 已明确决定 VERIFY，
+                # V6 安全验证通过后才允许状态机推进。
                 self.state["phase"] = "VERIFY"
 
                 self.state["summary_done"] = False
@@ -3502,3 +4152,18 @@ Python 审查:
                     observation[:MAX_OBSERVATION_CHARS]
                     + "\n\n[工具结果已截断]"
                 )
+
+            # V6.6:
+            # 每次工具执行完成后，刷新下一轮 GPT Decision Request。
+            # 不改变现有 observation，也不改变状态机流程。
+            self.state["decision_request"] = (
+                self.build_decision_request(
+                    observation
+                )
+            )
+
+            print(
+                "V6.6 Decision Request 已刷新:",
+                len(self.state["decision_request"]),
+                "chars"
+            )
