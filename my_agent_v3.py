@@ -23,6 +23,13 @@ BASE_URL = os.environ.get(
     "http://127.0.0.1:8080/v1"
 )
 
+# V6.7: Decision Layer 后端选择。
+# 默认 local，保持 V6.6 / 本地 Qwen 行为不变。
+DECISION_MODE = os.environ.get(
+    "AI_DECISION_MODE",
+    "local"
+).strip().lower()
+
 
 
 llm = ChatOpenAI(
@@ -36,6 +43,32 @@ llm = ChatOpenAI(
     temperature=0.2
 
 )
+
+
+# V6.7: Remote GPT 只作为独立 Decision Layer。
+# local 模式完全保持现有本地 Qwen。
+decision_llm = None
+
+if DECISION_MODE == "remote":
+
+    remote_api_key = os.environ.get(
+        "OPENAI_API_KEY",
+        ""
+    ).strip()
+
+    if not remote_api_key:
+        raise RuntimeError(
+            "AI_DECISION_MODE=remote 但 OPENAI_API_KEY 未设置"
+        )
+
+    decision_llm = ChatOpenAI(
+        model=os.environ.get(
+            "AI_DECISION_MODEL",
+            "gpt-5.6"
+        ),
+        api_key=remote_api_key,
+        temperature=0.2
+    )
 
 
 
@@ -105,7 +138,9 @@ agent = AutonomousAgent(
 
     project=os.path.expanduser(
         "~/llama.cpp"
-    )
+    ),
+
+    decision_llm=decision_llm
 
 )
 
