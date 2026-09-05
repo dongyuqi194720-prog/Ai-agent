@@ -245,6 +245,11 @@ class CodexBridge:
             ).first
 
             box.wait_for(state="visible", timeout=10000)
+
+            before_messages = page.locator(
+                "[data-message-author-role='assistant']"
+            ).count()
+
             box.focus()
             box.press("Control+A")
             page.keyboard.insert_text(str(prompt))
@@ -267,8 +272,11 @@ class CodexBridge:
                 if total_count == 0:
                     continue
 
-                # V6.9：直接读取当前页面最后一条 assistant 消息。
-                # 不再依赖 before_messages 判断新消息数量。
+                # V6.10：必须等待本次请求产生新的 assistant 消息。
+                if total_count <= before_messages:
+                    continue
+
+                # 只读取本次请求产生的最后一条 assistant 消息。
                 last_message = all_messages.nth(
                     total_count - 1
                 )

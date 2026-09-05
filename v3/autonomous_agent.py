@@ -2418,6 +2418,12 @@ SUMMARY
 
                     required_features = []
 
+                    # V6.10：订单类 CHANGE 任务的核心结构必须存在。
+                    if "Order" in question_text or "订单" in question_text:
+                        required_features.append(
+                            "class Order" in source_text
+                        )
+
                     if "货币" in question_text:
                         required_features.append(
                             any(
@@ -2444,6 +2450,24 @@ SUMMARY
                                     "cancelled"
                                 )
                             )
+                        )
+
+                    if (
+                        "按状态" in question_text
+                        or "查询订单" in question_text
+                        or "订单查询" in question_text
+                    ):
+                        required_features.append(
+                            "find_orders_by_status" in source_text
+                        )
+
+                    if (
+                        "订单数量" in question_text
+                        or "数量统计" in question_text
+                        or "订单计数" in question_text
+                    ):
+                        required_features.append(
+                            "count_orders" in source_text
                         )
 
                     if (
@@ -3505,7 +3529,7 @@ path
                     completion["remaining"]
                 )
 
-                if completion["complete"]:
+                if self.state.get("verify_result_passed", False) and completion["complete"]:
                     self.state["phase"] = "SUMMARY"
                     print(
                         "V6.10 TASK_COMPLETE → SUMMARY"
@@ -4656,9 +4680,19 @@ Python 审查:
 
                 self.state["waiting_codex"] = False
 
-                return self.resume_after_codex(
+                self.submit_codex_response(
                     codex_response
                 )
+
+                if not self.state.get(
+                    "codex_analyze_done",
+                    False
+                ):
+                    raise RuntimeError(
+                        "Codex 回复为空，无法恢复"
+                    )
+
+                continue
 
                 # ANALYZE 完成后建立 GPT Decision Request。
                 # 当前只保存请求，不调用 GPT，
