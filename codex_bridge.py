@@ -9,7 +9,7 @@ class CodexBridge:
     def __init__(
         self,
         model="gpt-5.6-terra",
-        timeout=120
+        timeout=600
     ):
 
         self.codex = os.path.expanduser(
@@ -76,8 +76,90 @@ class CodexBridge:
         if isinstance(response, dict):
             data = response
         else:
+            text = str(response).strip()
+
+            def section_after(text, title, next_titles):
+                marker = title + ":"
+                pos = text.find(marker)
+
+                if pos < 0:
+                    return ""
+
+                start_pos = pos + len(marker)
+                end_pos = len(text)
+
+                for next_title in next_titles:
+                    next_pos = text.find(
+                        next_title + ":",
+                        start_pos
+                    )
+
+                    if next_pos >= 0:
+                        end_pos = min(
+                            end_pos,
+                            next_pos
+                        )
+
+                return text[
+                    start_pos:end_pos
+                ].strip()
+
+            plan = section_after(
+                text,
+                "修改方案",
+                [
+                    "修改后完整源码",
+                    "预期结果"
+                ]
+            )
+
+            modified_source = section_after(
+                text,
+                "修改后完整源码",
+                [
+                    "预期结果"
+                ]
+            )
+
+            # V6.9：普通 ChatGPT 可能用 Markdown 代码围栏包裹源码。
+            # Bridge 只负责提取代码围栏内部源码，不修改源码内容。
+            modified_source = modified_source.strip()
+
+            if "```" in modified_source:
+                fence_parts = modified_source.split("```")
+
+                if len(fence_parts) >= 3:
+                    modified_source = fence_parts[1].strip()
+
+                    # 去掉 ```python / ```py 等语言标记。
+                    first_line = modified_source.splitlines()
+
+                    if (
+                        first_line
+                        and first_line[0].strip().lower()
+                        in {"python", "py"}
+                    ):
+                        modified_source = "\n".join(
+                            first_line[1:]
+                        ).strip()
+
+            expected_result = section_after(
+                text,
+                "预期结果",
+                []
+            )
+
+            analysis = text
+
+            plan_pos = text.find("修改方案:")
+            if plan_pos >= 0:
+                analysis = text[:plan_pos].strip()
+
             data = {
-                "analysis": str(response).strip()
+                "analysis": analysis,
+                "plan": plan,
+                "modified_source": modified_source,
+                "expected_result": expected_result
             }
 
         return {
@@ -88,6 +170,9 @@ class CodexBridge:
             "plan": str(
                 data.get("plan", "")
             ).strip(),
+            "modified_source": str(
+                data.get("modified_source", "")
+            ).strip(),
             "target_file": str(
                 data.get("target_file", "")
             ).strip(),
@@ -96,14 +181,58 @@ class CodexBridge:
             ).strip()
         }
 
-
     def ask(self, prompt):
         """V6 -> 普通 ChatGPT -> V6。"""
 
         with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(
-                "http://127.0.0.1:9222"
-            )
+            proxy_keys = [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy"
+            ]
+
+            saved_proxy = {
+                key: os.environ.get(key)
+                for key in proxy_keys
+            }
+
+            for key in proxy_keys:
+                os.environ.pop(key, None)
+
+            try:
+                import json
+                import urllib.request
+
+                req = urllib.request.Request(
+                    "http://127.0.0.1:9222/json/version"
+                )
+
+                with urllib.request.urlopen(
+                    req,
+                    timeout=5
+                ) as r:
+                    cdp_info = json.load(r)
+
+                ws_url = cdp_info.get(
+                    "webSocketDebuggerUrl",
+                    ""
+                )
+
+                if not ws_url:
+                    raise RuntimeError(
+                        "CDP webSocketDebuggerUrl 不存在"
+                    )
+
+                browser = p.chromium.connect_over_cdp(
+                    ws_url
+                )
+            finally:
+                for key, value in saved_proxy.items():
+                    if value is not None:
+                        os.environ[key] = value
 
             page = browser.contexts[0].pages[0]
 
@@ -111,38 +240,59 @@ class CodexBridge:
                 "[data-message-author-role='assistant']"
             )
 
-            before_count = messages.count()
-
             box = page.locator(
                 "[contenteditable='true'][aria-label='与 ChatGPT 聊天']"
             ).first
 
-            box.click()
-            box.fill(str(prompt))
+            box.wait_for(state="visible", timeout=10000)
+            box.focus()
+            box.press("Control+A")
+            page.keyboard.insert_text(str(prompt))
             box.press("Enter")
 
             deadline = time.time() + self.timeout
 
+            last_response = ""
+            stable_count = 0
+
             while time.time() < deadline:
                 time.sleep(1)
 
-                stop = page.locator(
-                    "button[aria-label='停止回答']"
+                all_messages = page.locator(
+                    "[data-message-author-role='assistant']"
                 )
 
-                if stop.count() > 0:
+                total_count = all_messages.count()
+
+                if total_count == 0:
                     continue
 
-                current_count = messages.count()
+                # V6.9：直接读取当前页面最后一条 assistant 消息。
+                # 不再依赖 before_messages 判断新消息数量。
+                last_message = all_messages.nth(
+                    total_count - 1
+                )
 
-                if current_count <= before_count:
+                try:
+                    response = last_message.inner_text(
+                        timeout=1000
+                    ).strip()
+                except Exception:
                     continue
 
-                response = messages.nth(
-                    current_count - 1
-                ).inner_text().strip()
+                if not response:
+                    continue
 
-                if response:
+                # V6.9：只要消息序列产生了新的 assistant 消息，
+                # 即使文本与上一条完全相同，也认为是新回答。
+                if response == last_response:
+                    stable_count += 1
+                else:
+                    last_response = response
+                    stable_count = 0
+
+                # 连续两秒文本没有变化，认为回答已经完成。
+                if stable_count >= 2:
                     browser.close()
                     return response
 

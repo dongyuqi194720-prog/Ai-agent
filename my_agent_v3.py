@@ -1,5 +1,19 @@
 import os
 
+# V6：统一代理协议，httpx 不接受 socks://，统一转换为 socks5://。
+for _proxy_key in (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+):
+    _proxy = os.environ.get(_proxy_key)
+    if _proxy and _proxy.startswith("socks://"):
+        os.environ[_proxy_key] = "socks5://" + _proxy[len("socks://"):]
+
+
 
 from langchain_openai import ChatOpenAI
 
@@ -32,17 +46,28 @@ DECISION_MODE = os.environ.get(
 
 
 
-llm = ChatOpenAI(
+# V6：本地 Qwen 使用 127.0.0.1，不经过 SOCKS 代理。
+_proxy_env = {}
+for _proxy_key in (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+):
+    if _proxy_key in os.environ:
+        _proxy_env[_proxy_key] = os.environ.pop(_proxy_key)
 
-    model=MODEL,
-
-    base_url=BASE_URL,
-
-    api_key="none",
-
-    temperature=0.2
-
-)
+try:
+    llm = ChatOpenAI(
+        model=MODEL,
+        base_url=BASE_URL,
+        api_key="none",
+        temperature=0.2
+    )
+finally:
+    os.environ.update(_proxy_env)
 
 
 # V6.7: Remote GPT 只作为独立 Decision Layer。
@@ -151,8 +176,19 @@ while True:
 
     try:
 
-        question = input(
-            "\n你: "
+        print("\n你: ", end="", flush=True)
+        input_lines = []
+
+        while True:
+            line = input()
+
+            if line.strip() == "END":
+                break
+
+            input_lines.append(line)
+
+        question = "\n".join(
+            input_lines
         ).strip()
 
 

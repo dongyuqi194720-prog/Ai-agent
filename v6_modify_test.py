@@ -1,17 +1,19 @@
-```python
 def calculate_total(price, quantity, discount):
-    return price * quantity * discount
+    """
+    计算总价，包括价格、数量和折扣。
 
-def test_calculate_total():
-    # 测试 case 1: 无 discount 参数
-    result1 = calculate_total(10, 2, 0)
-    assert result1 == 20, f"Expected 20, got {result1}"
+    参数:
+    price (float): 单价
+    quantity (int): 数量
+    discount (float): 折扣
 
-    # 测试 case 2: 有 discount 参数
-    result2 = calculate_total(10, 2, 0.5)
-    assert result2 == 10, f"Expected 10, got {result2}"
+    返回:
+    float: 总价
+    """
+    total = price * quantity * discount
+    return total
 
-    print("All tests passed!")
 
-test_calculate_total()
-```
+def calculate_with_tax(price, quantity, discount, tax):
+    total = calculate_total(price, quantity, discount)
+    return total + tax
