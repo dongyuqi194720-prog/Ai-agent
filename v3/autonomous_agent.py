@@ -1,3 +1,4 @@
+import time
 import copy
 import json
 import os
@@ -40,6 +41,14 @@ class AutonomousAgent:
         self.project = project
         self.max_steps = 20
         self.state = {
+            # V6 长任务协作身份链
+            "task_id": "",
+            "current_step_id": "STEP-001",
+            "gpt_turn": 0,
+            "original_task": "",
+            "current_step_requirement": "",
+            "previous_step_result": "",
+
             "phase": "SEARCH",
 
             "task_mode": "REVIEW",
@@ -467,9 +476,14 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
 
             try:
 
-                response = llm.invoke(
-                    prompt
-                )
+                if llm is self.llm:
+                    response = self.codex.ask(
+                        prompt
+                    )
+                else:
+                    response = llm.invoke(
+                        prompt
+                    )
 
                 result_queue.put(
                     (
@@ -582,6 +596,24 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             re.I | re.M
         )
 
+        control_match = re.search(
+            r"^\s*TASK_CONTROL\s*:\s*(CONTINUE_STEP|NEXT_STEP|DONE)",
+            text,
+            re.I | re.M
+        )
+
+        next_requirement_match = re.search(
+            r"^\s*NEXT_STEP_REQUIREMENT\s*:\s*(.*)$",
+            text,
+            re.I | re.M
+        )
+
+        task_control = (
+            control_match.group(1).upper()
+            if control_match
+            else "CONTINUE_STEP"
+        )
+
         action = (
             action_match.group(1).upper()
             if action_match
@@ -594,9 +626,17 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             else ""
         )
 
+        next_step_requirement = (
+            next_requirement_match.group(1).strip()
+            if next_requirement_match
+            else ""
+        )
+
         return {
+            "task_control": task_control,
             "action": action,
-            "reason": reason
+            "reason": reason,
+            "next_step_requirement": next_step_requirement
         }
 
 
@@ -614,7 +654,21 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
 
         state = self.state
 
+        state["gpt_turn"] = int(state.get("gpt_turn", 0)) + 1
+
         request = {
+            "TASK_ID": str(state.get("task_id", "")),
+            "CURRENT_STEP_ID": str(state.get("current_step_id", "")),
+            "GPT_TURN": state.get("gpt_turn", 0),
+            "ORIGINAL_TASK": str(
+                state.get("original_task", state.get("question", ""))
+            ),
+            "CURRENT_STEP_REQUIREMENT": str(
+                state.get("current_step_requirement", "")
+            ),
+            "PREVIOUS_STEP_RESULT": str(
+                state.get("previous_step_result", "")
+            ),
             "TASK": str(state.get("question", "")),
             "CURRENT_STATE": {
                 "phase": state.get("phase", ""),
@@ -636,7 +690,12 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "VERIFY_RESULT": state.get("verify_result", ""),
             "LAST_RESULT": str(observation),
             "DECISION_PROTOCOL": {
-                "required_output": "ACTION: <ACTION>\\nREASON: <reason>",
+                "task_control": [
+                    "CONTINUE_STEP",
+                    "NEXT_STEP",
+                    "DONE"
+                ],
+                "required_output": "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\nACTION: <ACTION>\\nREASON: <reason>",
                 "allowed_actions": [
                     "SEARCH",
                     "READ",
@@ -652,13 +711,17 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                     "FINISH"
                 ],
                 "instruction": (
-                    "你现在是 GPT Decision Layer，只负责决定下一步 ACTION。"
+                    "你现在是 GPT Decision Layer，负责决定当前步骤和整个任务的下一步。"
                     "不要输出工具调用，不要输出代码，不要输出解释性正文。"
-                    "必须严格输出两行："
-                    "第一行 ACTION: <一个允许的 ACTION>"
-                    "第二行 REASON: <简短原因>"
+                    "必须严格输出三行："
+                    "第一行 TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>"
+                    "第二行 ACTION: <一个允许的 ACTION>"
+                    "第三行 REASON: <简短原因>"
+                    "TASK_CONTROL 必须来自 task_control。"
                     "ACTION 必须来自 allowed_actions。"
-                    "根据 CURRENT_STATE 和 LAST_RESULT 决定下一步动作。"
+                    "只有当前步骤已经真实验证通过时才能选择 NEXT_STEP。"
+                    "只有 ORIGINAL_TASK 已全部完成且最终真实验证通过时才能选择 DONE。"
+                    "根据 CURRENT_STATE、CURRENT_STEP_REQUIREMENT、PREVIOUS_STEP_RESULT 和 LAST_RESULT 决定。"
                 )
             },
         }
@@ -700,7 +763,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
 
         decision_prompt = (
             "你是 V6.6 GPT Decision Layer。\\n"
-            "只负责决定下一步 ACTION。\\n"
+            "负责决定当前步骤以及整个任务的下一步。\\n"
             "不要调用工具。\\n"
             "不要输出代码。\\n"
             "不要输出解释性正文。\\n"
@@ -709,16 +772,55 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             + phase_next_action + "\\n"
             "必须从当前阶段允许的 ACTION 中选择，"
             "禁止选择其他阶段的 ACTION。\\n"
-            "严格输出两行：\\n"
+            "严格输出四行：\\n"
+            "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\n"
             "ACTION: <一个允许的 ACTION>\\n"
-            "REASON: <简短原因>\\n\\n"
+            "REASON: <简短原因>\\n"
+            "NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>\\n\\n"
             + str(decision_request)
         )
 
-        return self.ask_llm(
+        response = self.ask_llm(
             decision_prompt,
             llm=self.decision_llm
         )
+
+        # V6 协议自修复：
+        # GPT 选择 NEXT_STEP 但遗漏下一步骤要求时，
+        # 自动再次请求 GPT 补全协议，不需要人工介入。
+        parsed = self.parse_action(response)
+
+        if (
+            parsed.get("task_control") == "NEXT_STEP"
+            and not str(
+                parsed.get("next_step_requirement", "")
+            ).strip()
+        ):
+            repair_prompt = (
+                "你刚才选择了 NEXT_STEP，但遗漏了 "
+                "NEXT_STEP_REQUIREMENT。\\n"
+                "请重新输出完整的四行 Decision Protocol。\\n"
+                "必须明确写出下一步骤要完成的具体要求。\\n"
+                "不要解释，不要输出其他内容。\\n"
+                "TASK_CONTROL: NEXT_STEP\\n"
+                "ACTION: <一个允许的 ACTION>\\n"
+                "REASON: <简短原因>\\n"
+                "NEXT_STEP_REQUIREMENT: <明确的下一步骤要求>\\n\\n"
+                "原始决策如下：\\n"
+                + str(response)
+            )
+
+            response = self.ask_llm(
+                repair_prompt,
+                llm=self.decision_llm
+            )
+
+        print(
+            "V6.10 RAW DECISION RESPONSE:",
+            repr(response)
+        )
+
+        return response
 
     def decision_step(
         self,
@@ -742,13 +844,34 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             action_data
         )
 
+        # NEXT_STEP 必须明确携带下一步骤要求。
+        # 防止 GPT 只说“继续下一步”而没有可执行要求。
+        if (
+            action_data.get("task_control") == "NEXT_STEP"
+            and not str(
+                action_data.get("next_step_requirement", "")
+            ).strip()
+        ):
+            validation["allowed"] = False
+            validation["reason"] = (
+                "NEXT_STEP_REQUIREMENT 为空，禁止推进下一步骤"
+            )
+
         result = {
+            "task_control": action_data.get(
+                "task_control",
+                "CONTINUE_STEP"
+            ),
             "action": action_data.get(
                 "action",
                 ""
             ),
             "reason": action_data.get(
                 "reason",
+                ""
+            ),
+            "next_step_requirement": action_data.get(
+                "next_step_requirement",
                 ""
             ),
             "allowed": validation.get(
@@ -1756,6 +1879,10 @@ SUMMARY
             )
 
             self.state["question"] = question
+            self.state["original_task"] = str(question)
+            self.state["task_id"] = "TASK-" + str(int(time.time() * 1000))
+            self.state["current_step_id"] = "STEP-001"
+            self.state["gpt_turn"] = 0
 
         if resume and question is None:
             question = self.state.get(
@@ -2482,13 +2609,16 @@ SUMMARY
                     # GPT 才能决定当前是否无需修改。
                     if not change_not_satisfied:
                         print(
-                            "V6.9 CHANGE: 需求已满足 → 直接 SUMMARY"
+                            "V6.9 CHANGE: 需求已满足 → 必须先执行真实验证"
                         )
 
                         self.state["problem_confirmed"] = False
                         self.state["can_modify"] = False
-                        self.state["summary_done"] = True
-                        self.state["phase"] = "SUMMARY"
+                        self.state["summary_done"] = False
+                        self.state["verify_result_done"] = False
+                        self.state["verify_result_passed"] = False
+                        self.state["modified_file"] = self.state.get("target_file")
+                        self.state["phase"] = "VERIFY_RESULT"
 
                         continue
 
@@ -3306,15 +3436,26 @@ path
             # V5.17:
             # MODIFY 后进入 VERIFY_RESULT。
             # 读取实际修改后的文件，验证修改是否真实落地。
-            if (
-                self.state["phase"] == "VERIFY_RESULT"
-                and self.state["modified_file"]
-            ):
+            if self.state["phase"] == "VERIFY_RESULT":
 
                 print()
                 print("========== VERIFY RESULT ==========")
 
-                modified_file = self.state["modified_file"]
+                modified_file = (
+                    self.state.get("modified_file")
+                    or self.state.get("target_file")
+                )
+
+                if not modified_file:
+                    self.state["verify_result_done"] = True
+                    self.state["verify_result_passed"] = False
+                    self.state["verify_result"] = (
+                        "VERIFY_RESULT:\n"
+                        "FAIL\n\n理由:\n"
+                        "没有可验证的目标文件"
+                    )
+                    self.state["phase"] = "SUMMARY"
+                    continue
 
                 verify_result = self.controller.call(
                     "read_file_chunk",
@@ -3506,11 +3647,10 @@ path
                 )
 
                 if completion["complete"]:
-                    self.state["phase"] = "SUMMARY"
                     print(
-                        "V6.10 TASK_COMPLETE → SUMMARY"
+                        "V6.10 TASK_COMPLETE: "
+                        "忽略任务级自动完成判断，必须由 GPT Decision Layer 决定 DONE"
                     )
-                    continue
 
                 # V6.10：任务级完成判断与 CHANGE 分析证据必须隔离。
                 # check_task_completion() 的 GPT 输出只负责判断：
@@ -3526,6 +3666,105 @@ path
                 self.state["codex_modified_source"] = ""
                 self.state["expected_result"] = ""
                 self.state["analysis_evidence_invalid"] = False
+
+                # V6.10：当前步骤真实验证通过后，先由 GPT Decision Layer 决定下一步。
+                if self.state.get("verify_result_passed", False):
+                    decision_request = self.build_decision_request(
+                        observation="当前步骤真实验证通过，但整个 ORIGINAL_TASK 尚未完成。请决定继续当前步骤、进入下一步骤或结束任务。"
+                    )
+
+                    decision_response = self.ask_decision(
+                        decision_request
+                    )
+
+                    decision = self.decision_step(
+                        decision_response
+                    )
+
+                    print(
+                        "V6.10 NEXT DECISION:",
+                        decision
+                    )
+
+                    self.state["task_control"] = decision.get(
+                        "task_control",
+                        "CONTINUE_STEP"
+                    )
+
+                    if (
+                        decision.get("task_control") == "DONE"
+                        and decision.get("allowed", False)
+                    ):
+                        self.state["task_control"] = "DONE"
+                        self.state["summary_done"] = True
+                        self.state["phase"] = "SUMMARY"
+                        print("V6.10 TASK_CONTROL=DONE → 任务完成")
+                        continue
+
+                    if (
+                        decision.get("task_control") == "NEXT_STEP"
+                        and decision.get("allowed", False)
+                        and str(
+                            decision.get("next_step_requirement", "")
+                        ).strip()
+                    ):
+                        current_step = str(
+                            self.state.get(
+                                "current_step_id",
+                                "STEP-001"
+                            )
+                        )
+
+                        try:
+                            step_number = int(
+                                current_step.rsplit("-", 1)[1]
+                            )
+                        except Exception:
+                            step_number = 1
+
+                        next_step = (
+                            "STEP-"
+                            + str(step_number + 1).zfill(3)
+                        )
+
+                        self.state["previous_step_result"] = str(
+                            self.state.get("verify_result", "")
+                        )
+
+                        self.state["current_step_id"] = next_step
+
+                        self.state["current_step_requirement"] = str(
+                            decision.get(
+                                "next_step_requirement",
+                                ""
+                            )
+                        ).strip()
+
+                        print(
+                            "V6.10 STEP ADVANCE:",
+                            current_step,
+                            "->",
+                            next_step
+                        )
+
+                        self.state["read_index"] = 0
+                        self.state["analysis_context"] = []
+                        self.state["read_done"] = False
+                        self.state["analyze_done"] = False
+                        self.state["analysis_result"] = ""
+                        self.state["problem_confirmed"] = False
+                        self.state["modify_plan_done"] = False
+                        self.state["modify_plan"] = ""
+                        self.state["plan_verify_done"] = False
+                        self.state["plan_verify_passed"] = False
+                        self.state["verify_done"] = False
+                        self.state["verify_result_done"] = False
+                        self.state["verify_result_passed"] = False
+                        self.state["verify_result"] = ""
+                        self.state["phase"] = "READ"
+
+                        continue
+
 
                 # 任务尚未完成：
                 # 开始下一轮真实 GPT↔V6 协作。
@@ -3558,8 +3797,6 @@ path
 
                 self.state["problem_confirmed"] = False
                 self.state["can_modify"] = False
-
-                # target_file 保留，SEARCH 会复用可靠目标文件。
                 self.state["phase"] = "READ"
 
                 continue
@@ -3629,7 +3866,8 @@ path
                 and self.state.get("task_mode") == "CHANGE"
                 and not self.state.get("problem_confirmed", False)
                 and self.state.get("summary_done", False)
-                and not self.state.get("verify_result_done", False)
+                and self.state.get("verify_result_done", False)
+                and self.state.get("verify_result_passed", False)
             ):
                 response = (
                     "### 最终报告\\n\\n"
@@ -4337,8 +4575,17 @@ path
                         analysis_prompt = f"""
 请根据用户明确提出的修改要求，检查下面提供的 Python 源码。
 
-用户要求:
-{self.state.get("question", "")}
+完整原始任务:
+{self.state.get("original_task", self.state.get("question", ""))}
+
+当前步骤:
+{self.state.get("current_step_id", "STEP-001")}
+
+当前步骤要求:
+{self.state.get("current_step_requirement", "")}
+
+上一步真实结果:
+{self.state.get("previous_step_result", "")}
 
 源码:
 {analysis_source}
@@ -4347,7 +4594,20 @@ path
 
 你的唯一判断目标是：
 
-当前真实源码是否已经满足用户明确提出的“源码功能要求”。
+当前真实源码是否已经满足“当前步骤要求”。
+
+重要规则：
+
+1. ORIGINAL_TASK 只是整个任务的上下文，不能把尚未进入的后续步骤当成当前步骤的问题。
+2. CURRENT_STEP_REQUIREMENT 是本轮唯一的源码功能判断目标。
+3. 如果 CURRENT_STEP_REQUIREMENT 为空，这是第一个步骤；请根据 ORIGINAL_TASK 选择最小、最先需要完成的一个功能增量作为本轮目标。
+4. 本轮只处理当前步骤，不要提前实现后续步骤。
+5. 当前步骤真实验证通过后，由 GPT Decision Layer 决定是否进入下一步骤。
+6. 不要因为 ORIGINAL_TASK 中存在“继续下一步”“多轮执行”等编排要求，就认为目标 Python 文件必须实现这些 Agent 行为。
+
+你的唯一判断目标仍然是：
+
+当前真实源码是否已经满足当前步骤要求。
 
 特别重要：
 
@@ -4390,8 +4650,8 @@ path
 需求满足: NO
 
 其中：
-- YES = 当前真实源码已经满足用户的全部明确要求。
-- NO = 当前真实源码至少有一项明确要求没有满足。
+- YES = 当前真实源码已经满足当前步骤要求。
+- NO = 当前步骤要求至少有一项没有满足。
 
 如果源码不满足用户要求，必须认定为明确问题。
 
@@ -4691,6 +4951,86 @@ Python 审查:
                     decision
                 )
 
+                # V6 长任务控制：记录 GPT 对当前步骤的控制意图。
+                task_control = decision.get(
+                    "task_control",
+                    "CONTINUE_STEP"
+                )
+                self.state["task_control"] = task_control
+
+                print(
+                    "V6 TASK CONTROL:",
+                    task_control,
+                    "STEP:",
+                    self.state.get("current_step_id", "")
+                )
+
+                # V6 最终完成安全门：
+                # GPT 不能单方面宣布 DONE。
+                # 必须存在真实的 VERIFY_RESULT，并且验证明确通过。
+                if task_control == "DONE":
+                    final_verify_ok = (
+                        self.state.get("verify_result_done", False)
+                        and self.state.get("verify_result_passed", False)
+                    )
+
+                    if not final_verify_ok:
+                        print(
+                            "V6 DONE REJECTED:",
+                            "真实最终验证尚未通过"
+                        )
+                        self.state["task_control"] = "CONTINUE_STEP"
+                        task_control = "CONTINUE_STEP"
+
+                # V6 长任务安全门：
+                # 只有真实 VERIFY_RESULT 通过，才允许 GPT 推进下一步骤。
+                if (
+                    task_control == "NEXT_STEP"
+                    and self.state.get("verify_result_passed", False)
+                ):
+                    current_step = str(
+                        self.state.get("current_step_id", "STEP-001")
+                    )
+                    try:
+                        step_number = int(
+                            current_step.rsplit("-", 1)[1]
+                        )
+                    except Exception:
+                        step_number = 1
+
+                    next_step = "STEP-" + str(
+                        step_number + 1
+                    ).zfill(3)
+
+                    self.state["previous_step_result"] = str(
+                        self.state.get("verify_result", "")
+                    )
+                    self.state["current_step_id"] = next_step
+                    self.state["current_step_requirement"] = str(
+                        decision.get("next_step_requirement", "")
+                    ).strip()
+                    self.state["search_done"] = False
+                    self.state["read_done"] = False
+                    self.state["read_index"] = 0
+                    self.state["analyze_done"] = False
+                    self.state["analysis_result"] = ""
+                    self.state["problem_confirmed"] = False
+                    self.state["modify_plan_done"] = False
+                    self.state["plan_verify_passed"] = False
+                    self.state["verify_done"] = False
+                    self.state["verify_result_done"] = False
+                    self.state["verify_result_passed"] = False
+                    self.state["summary_done"] = False
+                    self.state["phase"] = "SEARCH"
+
+                    print(
+                        "V6 NEXT_STEP:",
+                        current_step,
+                        "->",
+                        next_step
+                    )
+                    continue
+
                 # V6.6：ACTION 正式成为状态推进门控。
                 # ANALYZE 阶段只能接受 VERIFY。
                 if not decision.get("allowed", False):
@@ -4943,12 +5283,12 @@ Python 审查:
                     task_text = str(question)
 
                     path_match = re.search(
-                        r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
+                        r"(~?/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
                         task_text
                     )
 
                     if path_match:
-                        candidate = path_match.group(1)
+                        candidate = os.path.expanduser(path_match.group(1))
 
                         if os.path.isfile(candidate):
                             fallback_file = candidate
