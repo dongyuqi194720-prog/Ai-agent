@@ -68,3 +68,100 @@ def vscode_open(path: str):
 
     except Exception as e:
         return f"打开失败: {e}"
+
+
+@tool
+def mouse_move(x: int, y: int):
+    """移动系统鼠标到指定屏幕坐标。"""
+    try:
+        subprocess.run(
+            ["xdotool", "mousemove", str(x), str(y)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return f"鼠标已移动到: ({x}, {y})"
+    except Exception as e:
+        return f"鼠标移动失败: {e}"
+
+
+@tool
+def mouse_click(button: int = 1, clicks: int = 1):
+    """执行系统鼠标点击。button 1=左键，2=中键，3=右键。"""
+    try:
+        for _ in range(max(1, clicks)):
+            subprocess.run(
+                ["xdotool", "click", str(button)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+        return f"鼠标点击完成: button={button}, clicks={clicks}"
+    except Exception as e:
+        return f"鼠标点击失败: {e}"
+
+
+@tool
+def keyboard_type(text: str):
+    """向当前活动窗口输入文本。"""
+    try:
+        subprocess.run(
+            ["xdotool", "type", "--clearmodifiers", "--", text],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        return "键盘输入完成"
+    except Exception as e:
+        return f"键盘输入失败: {e}"
+
+
+@tool
+def keyboard_press(key: str):
+    """向当前活动窗口发送一个键盘按键，例如 Return、Tab、Escape、ctrl+c。"""
+    try:
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", key],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return f"按键完成: {key}"
+    except Exception as e:
+        return f"按键失败: {e}"
+
+
+@tool
+def window_list(request: str = ""):
+    """列出当前桌面窗口。"""
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-l"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return result.stdout.strip() or "当前没有检测到窗口"
+    except Exception as e:
+        return f"窗口列表获取失败: {e}"
+
+
+@tool
+def window_activate(window_id: str):
+    """激活指定窗口，window_id 使用 window_list 返回的窗口 ID。"""
+    try:
+        subprocess.run(
+            ["wmctrl", "-i", "-a", window_id],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return f"窗口已激活: {window_id}"
+    except Exception as e:
+        return f"窗口激活失败: {e}"

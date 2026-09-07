@@ -604,6 +604,12 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             re.I | re.M
         )
 
+        args_match = re.search(
+            r"^[ \t]*ARGS[ \t]*:[ \t]*([^\r\n]*)$",
+            text,
+            re.I | re.M
+        )
+
         next_requirement_match = re.search(
             r"^\s*NEXT_STEP_REQUIREMENT\s*:\s*(.*)$",
             text,
@@ -628,6 +634,12 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             else ""
         )
 
+        args = (
+            args_match.group(1).strip()
+            if args_match
+            else ""
+        )
+
         next_step_requirement = (
             next_requirement_match.group(1).strip()
             if next_requirement_match
@@ -637,6 +649,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
         return {
             "task_control": task_control,
             "action": action,
+            "args": args,
             "reason": reason,
             "next_step_requirement": next_step_requirement
         }
@@ -697,7 +710,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                     "NEXT_STEP",
                     "DONE"
                 ],
-                "required_output": "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\nACTION: <ACTION>\\nREASON: <reason>",
+                "required_output": "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\nACTION: <ACTION>\\nARGS: <args>\\nREASON: <reason>\\nNEXT_STEP_REQUIREMENT: <requirement>",
                 "allowed_actions": [
                     "SEARCH",
                     "READ",
@@ -709,16 +722,24 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                     "TEST",
                     "BUILD",
                     "VERIFY_RESULT",
+                    "MOUSE_MOVE",
+                    "MOUSE_CLICK",
+                    "KEYBOARD_TYPE",
+                    "KEYBOARD_PRESS",
+                    "WINDOW_LIST",
+                    "WINDOW_ACTIVATE",
                     "DONE",
                     "FINISH"
                 ],
                 "instruction": (
                     "你现在是 GPT Decision Layer，负责决定当前步骤和整个任务的下一步。"
                     "不要输出工具调用，不要输出代码，不要输出解释性正文。"
-                    "必须严格输出三行："
+                    "必须严格输出五行："
                     "第一行 TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>"
                     "第二行 ACTION: <一个允许的 ACTION>"
-                    "第三行 REASON: <简短原因>"
+                    "第三行 ARGS: <当前 ACTION 所需参数；无需参数时留空>"
+                    "第四行 REASON: <简短原因>"
+                    "第五行 NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>"
                     "TASK_CONTROL 必须来自 task_control。"
                     "ACTION 必须来自 allowed_actions。"
                     "只有当前步骤已经真实验证通过时才能选择 NEXT_STEP。"
@@ -749,15 +770,15 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
         ).strip().upper()
 
         phase_next_action = {
-            "SEARCH": "SEARCH 或 READ",
-            "READ": "READ 或 ANALYZE",
-            "ANALYZE": "VERIFY",
-            "VERIFY": "MODIFY_PLAN",
-            "MODIFY_PLAN": "PLAN_VERIFY",
-            "PLAN_VERIFY": "MODIFY",
-            "MODIFY": "VERIFY_RESULT",
-            "VERIFY_RESULT": "DONE 或 FINISH",
-            "SUMMARY": "DONE 或 FINISH",
+            "SEARCH": "SEARCH、READ 或 COMPUTER ACTION",
+            "READ": "READ、ANALYZE 或 COMPUTER ACTION",
+            "ANALYZE": "VERIFY 或 COMPUTER ACTION",
+            "VERIFY": "MODIFY_PLAN 或 COMPUTER ACTION",
+            "MODIFY_PLAN": "PLAN_VERIFY 或 COMPUTER ACTION",
+            "PLAN_VERIFY": "MODIFY 或 COMPUTER ACTION",
+            "MODIFY": "VERIFY_RESULT 或 COMPUTER ACTION",
+            "VERIFY_RESULT": "DONE、FINISH 或 COMPUTER ACTION",
+            "SUMMARY": "DONE、FINISH 或 COMPUTER ACTION",
         }.get(
             phase,
             ""
@@ -772,11 +793,14 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "当前阶段: " + phase + "\\n"
             "当前阶段允许的下一步 ACTION: "
             + phase_next_action + "\\n"
-            "必须从当前阶段允许的 ACTION 中选择，"
-            "禁止选择其他阶段的 ACTION。\\n"
-            "严格输出四行：\\n"
+            "开发阶段 ACTION 必须遵守当前阶段流程；"
+            "但 COMPUTER ACTION（MOUSE_MOVE、MOUSE_CLICK、"
+            "KEYBOARD_TYPE、KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE）"
+            "可在任何阶段按任务需要直接选择。\\n"
+            "严格输出五行：\\n"
             "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\n"
             "ACTION: <一个允许的 ACTION>\\n"
+            "ARGS: <当前 ACTION 所需参数；无需参数时留空>\\n"
             "REASON: <简短原因>\\n"
             "NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>\\n\\n"
             + str(decision_request)
@@ -866,6 +890,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             ),
             "action": action_data.get(
                 "action",
+                ""
+            ),
+            "args": action_data.get(
+                "args",
                 ""
             ),
             "reason": action_data.get(
@@ -965,6 +993,12 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "TEST",
             "BUILD",
             "VERIFY_RESULT",
+            "MOUSE_MOVE",
+            "MOUSE_CLICK",
+            "KEYBOARD_TYPE",
+            "KEYBOARD_PRESS",
+            "WINDOW_LIST",
+            "WINDOW_ACTIVATE",
             "DONE",
             "FINISH"
         }
@@ -989,6 +1023,14 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "PLAN_VERIFY": {"MODIFY"},
             "MODIFY": {"VERIFY_RESULT"},
             "VERIFY_RESULT": {"DONE", "FINISH"},
+            "COMPUTER": {
+                "MOUSE_MOVE",
+                "MOUSE_CLICK",
+                "KEYBOARD_TYPE",
+                "KEYBOARD_PRESS",
+                "WINDOW_LIST",
+                "WINDOW_ACTIVATE",
+            },
             "SUMMARY": {"DONE", "FINISH"},
         }
 
@@ -997,7 +1039,19 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             set()
         )
 
-        if action not in allowed_for_phase:
+        computer_actions = {
+            "MOUSE_MOVE",
+            "MOUSE_CLICK",
+            "KEYBOARD_TYPE",
+            "KEYBOARD_PRESS",
+            "WINDOW_LIST",
+            "WINDOW_ACTIVATE",
+        }
+
+        if (
+            action not in allowed_for_phase
+            and action not in computer_actions
+        ):
             return {
                 "allowed": False,
                 "action": action,
@@ -1643,6 +1697,15 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             # MODIFY 第一阶段只允许执行 write_file。
             "MODIFY": [
                 "write_file"
+            ],
+
+            "COMPUTER": [
+                "mouse_move",
+                "mouse_click",
+                "keyboard_type",
+                "keyboard_press",
+                "window_list",
+                "window_activate"
             ],
 
             "SUMMARY": []
@@ -4039,11 +4102,55 @@ path
                 "action",
                 ""
             )
+            self.state["decision_args"] = decision.get(
+                "args",
+                ""
+            )
 
             print(
                 "V6.6 Decision:",
                 decision
             )
+
+            # V6.11 COMPUTER Decision Gate：
+            # GPT Decision Layer 直接控制真实桌面工具。
+            computer_tools = {
+                "MOUSE_MOVE": "mouse_move",
+                "MOUSE_CLICK": "mouse_click",
+                "KEYBOARD_TYPE": "keyboard_type",
+                "KEYBOARD_PRESS": "keyboard_press",
+                "WINDOW_LIST": "window_list",
+                "WINDOW_ACTIVATE": "window_activate",
+            }
+
+            decision_action = str(
+                decision.get("action", "")
+            ).strip().upper()
+
+            if (
+                decision.get("allowed", False)
+                and decision_action in computer_tools
+            ):
+                self.state["computer_return_phase"] = self.state.get("phase", "ANALYZE")
+                self.state["phase"] = "COMPUTER"
+                tool = computer_tools[decision_action]
+                args = str(
+                    decision.get("args", "")
+                ).strip()
+
+                print(
+                    "V6.11 COMPUTER:",
+                    decision_action,
+                    "->",
+                    tool,
+                    "ARGS=",
+                    args
+                )
+
+            else:
+                tool, args = self.extract_tool(
+                    response
+                )
 
             # V6.6 ANALYZE Decision Gate:
             # GPT 决定 VERIFY 后，立即切换状态并结束本轮。
@@ -4066,9 +4173,10 @@ path
                 continue
 
 
-            tool, args = self.extract_tool(
-                response
-            )
+            # V6.11：
+            # COMPUTER ACTION 已在上面的 Decision Gate 中完成
+            # ACTION -> tool/args 映射，不再重复解析。
+            # 其他 ACTION 继续使用原有 extract_tool()。
 
             # V6.1.5:
             # SEARCH 阶段由状态机强制执行 search_code_index。
@@ -4368,6 +4476,41 @@ path
 
             print("DEBUG tool returned:", type(result))
             print("DEBUG result length:", len(str(result)))
+
+            # V6.11 COMPUTER：真实桌面工具执行完成后，
+            # 将真实结果立即交回 GPT Decision Layer。
+            computer_tool_names = {
+                "mouse_move",
+                "mouse_click",
+                "keyboard_type",
+                "keyboard_press",
+                "window_list",
+                "window_activate",
+            }
+
+            if tool in computer_tool_names:
+
+                self.state["phase"] = self.state.get("computer_return_phase", "ANALYZE")
+                self.state["previous_step_result"] = str(
+                    self.state.get("last_result", "")
+                )
+
+                self.state["decision_request"] = (
+                    self.build_decision_request(
+                        observation=(
+                            "COMPUTER 工具已真实执行完成。"
+                            "请根据真实执行结果继续决定下一步 ACTION。"
+                        )
+                    )
+                )
+
+                print(
+                    "V6.11 COMPUTER Result → GPT Decision:",
+                    len(self.state["decision_request"]),
+                    "chars"
+                )
+
+                continue
 
             if tool == "read_file_chunk":
 
@@ -5364,9 +5507,19 @@ Python 审查:
                             "V6.1.9 SEARCH 无结果，停止重复搜索"
                         )
 
-                        self.state["summary_done"] = True
-                        self.state["phase"] = "SUMMARY"
-
+                        self.state["previous_step_result"] = (
+                            "SEARCH 无结果。没有找到代码搜索结果，"
+                            "但不能据此判定原始任务完成。"
+                        )
+                        self.state["decision_request"] = (
+                            self.build_decision_request(
+                                observation=(
+                                    "SEARCH 工具真实执行完成，但没有搜索结果。"
+                                    "请根据 ORIGINAL_TASK 继续决定下一步，"
+                                    "不要假设任务已完成。"
+                                )
+                            )
+                        )
                         continue
 
 
