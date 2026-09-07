@@ -48,6 +48,8 @@ class AutonomousAgent:
             "original_task": "",
             "current_step_requirement": "",
             "previous_step_result": "",
+            "modify_required": False,
+            "modify_executed": False,
 
             "phase": "SEARCH",
 
@@ -2465,7 +2467,29 @@ SUMMARY
                     "REVIEW"
                 )
                 if task_mode == "CHANGE":
-                    # V6.3: 通用 CHANGE 需求缺失判断。
+                    # V6.10：识别用户明确要求“必须实际 MODIFY”的步骤约束。
+                    step_requirement = str(
+                        self.state.get("current_step_requirement", "")
+                    )
+                    original_task = str(
+                        self.state.get("original_task", "")
+                    )
+                    force_modify_text = (
+                        step_requirement + "\n" + original_task
+                    )
+                    force_modify_markers = (
+                        "必须实际修改",
+                        "必须实际 MODIFY",
+                        "必须 MODIFY",
+                        "不得跳过",
+                        "不能跳过",
+                    )
+                    self.state["modify_required"] = any(
+                        marker in force_modify_text
+                        for marker in force_modify_markers
+                    )
+
+                    # V6.3: 通用 CHANGE 需求缺失判断.
                     # 只根据 ANALYZE 的“问题”段判断，
                     # 不绑定具体业务关键词，也不依赖“结论”字段。
                     problem_match = re.search(
@@ -2603,6 +2627,24 @@ SUMMARY
 
                         # 必须立即进入本轮修改链路，
                         # 不能继续落入旧的 SUMMARY 控制流。
+                        continue
+
+                    # V6.10：当前步骤明确要求实际 MODIFY 时，
+                    # 即使需求已经满足，也必须进入真实修改链路。
+                    if (
+                        self.state.get("modify_required", False)
+                        and not self.state.get("modify_executed", False)
+                    ):
+                        print(
+                            "V6.10 CHANGE FORCE MODIFY: "
+                            "当前步骤要求实际 MODIFY → 禁止跳过修改"
+                        )
+
+                        self.state["problem_confirmed"] = True
+                        self.state["can_modify"] = True
+                        self.state["summary_done"] = False
+                        self.state["phase"] = "MODIFY_PLAN"
+
                         continue
 
                     # V6.9：只有任务级功能检查通过后，
@@ -3417,6 +3459,10 @@ path
                     result
                 )
 
+                # V6.10：已经实际执行 write_file，记录当前步骤已执行 MODIFY。
+                # 内容是否正确仍必须由后续 VERIFY_RESULT 真实验证。
+                self.state["modify_executed"] = True
+
                 # V5.17:
                 # MODIFY 成功后必须进入 VERIFY_RESULT，
                 # 不能直接进入 SUMMARY。
@@ -3753,6 +3799,8 @@ path
                         self.state["analyze_done"] = False
                         self.state["analysis_result"] = ""
                         self.state["problem_confirmed"] = False
+                        self.state["modify_required"] = False
+                        self.state["modify_executed"] = False
                         self.state["modify_plan_done"] = False
                         self.state["modify_plan"] = ""
                         self.state["plan_verify_done"] = False
