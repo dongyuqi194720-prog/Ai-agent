@@ -1,0 +1,91 @@
+import re
+import subprocess
+
+
+def list_windows():
+    """Return visible X11 windows with basic application metadata."""
+    result = subprocess.run(
+        ["wmctrl", "-lxG"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    windows = []
+    for line in result.stdout.splitlines():
+        m = re.match(
+            r"^(0x[0-9a-f]+)\s+\S+\s+(-?\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+\S+\s+(.*)$",
+            line,
+        )
+        if not m:
+            continue
+
+        window_id, x, y, width, height, wm_class, title = m.groups()
+
+        windows.append({
+            "window_id": window_id,
+            "pid": _get_pid(window_id),
+            "wm_class": wm_class,
+            "title": title.strip(),
+            "x": int(x),
+            "y": int(y),
+            "width": int(width),
+            "height": int(height),
+        })
+
+    return windows
+
+
+def _get_pid(window_id):
+    result = subprocess.run(
+        ["xprop", "-id", window_id, "_NET_WM_PID"],
+        capture_output=True,
+        text=True,
+    )
+    m = re.search(r"=\s*(\d+)", result.stdout)
+    return int(m.group(1)) if m else None
+
+
+def inspect_process(pid):
+    """Return basic process metadata for a GUI application's PID."""
+    pid = int(pid)
+
+    exe = subprocess.run(
+        ["readlink", "-f", f"/proc/{pid}/exe"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    raw_cmdline = open(f"/proc/{pid}/cmdline", "rb").read()
+    cmdline = raw_cmdline.replace(b"\0", b" ").decode(errors="replace").strip()
+
+    children = []
+    children_path = f"/proc/{pid}/task/{pid}/children"
+    try:
+        raw_children = open(children_path, "rb").read()
+        children = [int(x) for x in raw_children.split()]
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    return {
+        "pid": pid,
+        "exe": exe,
+        "cmdline": cmdline,
+        "children": children,
+    }
+
+
+def find_window(query):
+    """Find the first GUI window whose title or WM_CLASS matches query."""
+    query = str(query).strip().lower()
+    if not query:
+        return None
+
+    for window in list_windows():
+        if (
+            query in window["title"].lower()
+            or query in window["wm_class"].lower()
+        ):
+            return window
+
+    return None
