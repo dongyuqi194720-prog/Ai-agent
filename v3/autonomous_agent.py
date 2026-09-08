@@ -1014,8 +1014,20 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             self.state.get("phase", "")
         ).strip().upper()
 
+        # V6.11: GPT 已明确确认整个原始任务完成时，
+        # DONE 属于全局终态，不受当前 phase ACTION 白名单限制。
+        if (
+            str(action_data.get("task_control", "")).strip().upper() == "DONE"
+            and action == "DONE"
+        ):
+            return {
+                "allowed": True,
+                "action": "DONE",
+                "reason": "GPT 已确认原始任务完成"
+            }
+
         phase_actions = {
-            "SEARCH": {"SEARCH", "READ"},
+            "SEARCH": {"SEARCH", "READ", "VERIFY_RESULT"},
             "READ": {"READ", "ANALYZE"},
             "ANALYZE": {"VERIFY"},
             "VERIFY": {"MODIFY_PLAN"},
@@ -4147,6 +4159,16 @@ path
                     args
                 )
 
+            elif (
+                decision.get("allowed", False)
+                and decision_action == "VERIFY_RESULT"
+            ):
+                self.state["phase"] = "VERIFY_RESULT"
+                print(
+                    "V6.11 Decision: GPT 已选择 VERIFY_RESULT"
+                )
+                continue
+
             else:
                 tool, args = self.extract_tool(
                     response
@@ -5172,6 +5194,12 @@ Python 审查:
                         )
                         self.state["task_control"] = "CONTINUE_STEP"
                         task_control = "CONTINUE_STEP"
+                    else:
+                        self.state["task_control"] = "DONE"
+                        self.state["summary_done"] = True
+                        self.state["phase"] = "SUMMARY"
+                        print("V6 DONE VERIFIED → 任务完成")
+                        return
 
                 # V6 长任务安全门：
                 # 只有真实 VERIFY_RESULT 通过，才允许 GPT 推进下一步骤。
