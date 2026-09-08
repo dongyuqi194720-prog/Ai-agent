@@ -4025,11 +4025,12 @@ path
                 )
 
                 if completion["complete"]:
-                    print(
-                        "V6.10 TASK_COMPLETE: "
-                        "忽略任务级自动完成判断，必须由 GPT Decision Layer 决定 DONE"
-                    )
+                    self.state["task_control"] = "DONE"
+                    self.state["summary_done"] = True
+                    self.state["phase"] = "SUMMARY"
+                    print("V6.15 TASK_COMPLETE → 直接进入 SUMMARY")
 
+                    continue
                 # V6.10：任务级完成判断与 CHANGE 分析证据必须隔离。
                 # check_task_completion() 的 GPT 输出只负责判断：
                 # “整个用户任务是否完成”。
