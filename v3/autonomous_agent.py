@@ -804,6 +804,9 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                     "WINDOW_LIST",
                     "WINDOW_ACTIVATE",
                     "BROWSER_STATE",
+                    "BROWSER_TEXT",
+                    "BROWSER_ELEMENTS",
+                    "BROWSER_CLICK_TEXT",
                     "DONE",
                     "FINISH"
                 ],
@@ -866,12 +869,13 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "根据任务和最近一次真实工具结果，选择下一步动作。\\n"
                 "只能输出 JSON，不要解释。\\n"
                 '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
+                "一次尽可能规划完整动作序列；网页元素优先使用 BROWSER_STATE、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT，不要用 MOUSE_CLICK 代替。\n"
                 "允许动作：MOUSE_MOVE、MOUSE_CLICK、KEYBOARD_TYPE、"
-                "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE、DONE。\\n"
+                "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE、BROWSER_TEXT、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT、DONE。\\n"
                 "任务："
                 + str(self.state.get("question", ""))
                 + "\\n最近结果："
-                + str(self.state.get("previous_step_result", ""))
+                + str(decision_request)
             )
         else:
             decision_prompt = (
@@ -1093,6 +1097,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "KEYBOARD_PRESS",
             "WINDOW_LIST",
             "WINDOW_ACTIVATE",
+            "BROWSER_STATE",
+            "BROWSER_TEXT",
+            "BROWSER_ELEMENTS",
+            "BROWSER_CLICK_TEXT",
             "DONE",
             "FINISH"
         }
@@ -1814,7 +1822,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "keyboard_press",
                 "window_list",
                 "window_activate",
-                "browser_state"
+                "browser_state",
+                "browser_text_tool",
+                "browser_elements_tool",
+                "browser_click_text_tool"
             ],
 
             "SUMMARY": []
@@ -2212,6 +2223,28 @@ SUMMARY
                     "V6.12 BROWSER FAST PATH ERROR:",
                     str(e)
                 )
+
+        # V6.14: 简单浏览器动作快速通道
+        simple_browser_click = re.search(r'(?:如果|若).*?(?:页面|网页).*?(?:看到|出现)[“"”]([^“"”]+)[“"”].*?(?:点击|单击)[“"”]([^“"”]+)[“"”]', str(question))
+        if browser_task and simple_browser_click:
+            target = simple_browser_click.group(2).strip()
+            try:
+                from tools.browser_observer import browser_elements, browser_click_text, browser_text
+                elements = browser_elements()
+                found = any(str(e.get("text", "")).strip() == target or str(e.get("aria", "")).strip() == target for e in elements)
+                if found:
+                    print("V6.14 BROWSER FAST PATH: CLICK", target)
+                    clicked = browser_click_text(target)
+                    if clicked:
+                        observation = browser_text()
+                        self.state["previous_step_result"] = observation
+                        self.state["verify_result_done"] = True
+                        self.state["verify_result_passed"] = True
+                        self.state["phase"] = "DONE"
+                        print("V6.14 BROWSER FAST PATH: DONE")
+                        return observation
+            except Exception as e:
+                print("V6.14 BROWSER FAST PATH ERROR:", str(e))
 
         for step in range(
             1,
@@ -4332,7 +4365,9 @@ path
                 )
             else:
                 response = self.ask_llm(
-                    prompt
+                    self.state.get("decision_request", prompt)
+                    if self.state.get("phase") == "COMPUTER"
+                    else prompt
                 )
 
             print(response)
@@ -4369,6 +4404,9 @@ path
                 "WINDOW_LIST": "window_list",
                 "WINDOW_ACTIVATE": "window_activate",
                 "BROWSER_STATE": "browser_state",
+                "BROWSER_TEXT": "browser_text_tool",
+                "BROWSER_ELEMENTS": "browser_elements_tool",
+                "BROWSER_CLICK_TEXT": "browser_click_text_tool",
             }
 
             decision_action = str(
@@ -4417,6 +4455,9 @@ path
                 args = str(
                     decision.get("args", "")
                 ).strip()
+
+                if tool == "browser_state":
+                    args = {}
 
                 print(
                     "V6.11 COMPUTER:",
@@ -4776,15 +4817,16 @@ path
                 "keyboard_press",
                 "window_list",
                 "window_activate",
-                "browser_state"
+                "browser_state",
+                "browser_text_tool",
+                "browser_elements_tool",
+                "browser_click_text_tool"
             }
 
             if tool in computer_tool_names:
 
                 self.state["phase"] = self.state.get("computer_return_phase", "ANALYZE")
-                self.state["previous_step_result"] = str(
-                    self.state.get("last_result", "")
-                )
+                self.state["previous_step_result"] = str(result)
 
                 self.state["decision_request"] = (
                     self.build_decision_request(
