@@ -141,6 +141,7 @@ class AutonomousAgent:
             # 不改变现有 V6.5 状态机。
             "decision_request": "",
             "last_action": "",
+            "computer_action_queue": [],
         }
          
 
@@ -478,14 +479,9 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
 
             try:
 
-                if llm is self.llm:
-                    response = self.codex.ask(
-                        prompt
-                    )
-                else:
-                    response = llm.invoke(
-                        prompt
-                    )
+                response = llm.invoke(
+                    prompt
+                )
 
                 result_queue.put(
                     (
@@ -585,6 +581,78 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
         """
 
         text = str(response).strip()
+
+        # V6.12: JSON Decision Protocol，支持单动作、多动作数组、连续 JSON 对象。
+        try:
+            json_text = text
+            if json_text.startswith("```"):
+                json_text = re.sub(r"^```(?:json)?\\s*|\\s*```$", "", json_text, flags=re.I | re.S).strip()
+
+            data = None
+
+            # 1. 标准单 JSON / JSON 数组
+            try:
+                data = json.loads(json_text)
+            except Exception:
+                # 2. Qwen 可能连续输出多个 JSON 对象：}{ 或 },{
+                decoder = json.JSONDecoder()
+                pos = 0
+                items = []
+                while pos < len(json_text):
+                    while pos < len(json_text) and json_text[pos].isspace():
+                        pos += 1
+                    if pos >= len(json_text):
+                        break
+                    item, end = decoder.raw_decode(json_text, pos)
+                    items.append(item)
+                    pos = end
+
+                    # 允许连续 JSON 对象之间存在逗号。
+                    while pos < len(json_text) and json_text[pos].isspace():
+                        pos += 1
+                    if pos < len(json_text) and json_text[pos] == ",":
+                        pos += 1
+                if items:
+                    data = items
+
+            if isinstance(data, dict) and "ACTION" in data:
+                actions = [data]
+
+            elif isinstance(data, list):
+                actions = [
+                    item for item in data
+                    if isinstance(item, dict) and "ACTION" in item
+                ]
+
+            else:
+                actions = []
+
+            if actions:
+                first = actions[0]
+                return {
+                    "task_control": str(
+                        first.get("TASK_CONTROL", "CONTINUE_STEP")
+                    ).upper(),
+                    "action": str(
+                        first.get("ACTION", "")
+                    ).upper(),
+                    "args": str(first.get("ARGS", "")),
+                    "reason": str(first.get("REASON", "")),
+                    "next_step_requirement": str(
+                        first.get("NEXT_STEP_REQUIREMENT", "")
+                    ),
+                    "actions": [
+                        {
+                            "action": str(item.get("ACTION", "")).upper(),
+                            "args": str(item.get("ARGS", "")),
+                            "reason": str(item.get("REASON", "")),
+                        }
+                        for item in actions
+                    ],
+                }
+
+        except Exception:
+            pass
 
         action_match = re.search(
             r"^\s*ACTION\s*:\s*([A-Z_]+)",
@@ -699,10 +767,17 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "verify_result_done": state.get("verify_result_done", False),
                 "verify_result_passed": state.get("verify_result_passed", False),
             },
-            "SOURCE": state.get("analysis_context", []),
-            "ANALYSIS": state.get("analysis_result", ""),
-            "MODIFY_PLAN": state.get("modify_plan", ""),
-            "VERIFY_RESULT": state.get("verify_result", ""),
+            "CONTEXT": (
+                state.get("analysis_context", [])
+                if state.get("phase") in {"READ", "ANALYZE", "VERIFY"}
+                else state.get("analysis_result", "")
+                if state.get("phase") == "MODIFY_PLAN"
+                else state.get("modify_plan", "")
+                if state.get("phase") in {"PLAN_VERIFY", "MODIFY"}
+                else state.get("verify_result", "")
+                if state.get("phase") == "VERIFY_RESULT"
+                else ""
+            ),
             "LAST_RESULT": str(observation),
             "DECISION_PROTOCOL": {
                 "task_control": [
@@ -728,6 +803,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                     "KEYBOARD_PRESS",
                     "WINDOW_LIST",
                     "WINDOW_ACTIVATE",
+                    "BROWSER_STATE",
                     "DONE",
                     "FINISH"
                 ],
@@ -784,28 +860,42 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             ""
         )
 
-        decision_prompt = (
-            "你是 V6.6 GPT Decision Layer。\\n"
-            "负责决定当前步骤以及整个任务的下一步。\\n"
-            "不要调用工具。\\n"
-            "不要输出代码。\\n"
-            "不要输出解释性正文。\\n"
-            "当前阶段: " + phase + "\\n"
-            "当前阶段允许的下一步 ACTION: "
-            + phase_next_action + "\\n"
-            "开发阶段 ACTION 必须遵守当前阶段流程；"
-            "但 COMPUTER ACTION（MOUSE_MOVE、MOUSE_CLICK、"
-            "KEYBOARD_TYPE、KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE）"
-            "可在任何阶段按任务需要直接选择。\\n"
-            "严格输出五行：\\n"
-            "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\n"
-            "ACTION: <一个允许的 ACTION>\\n"
-            "ARGS: <当前 ACTION 所需参数；无需参数时留空>\\n"
-            "REASON: <简短原因>\\n"
-            "NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>\\n\\n"
-            + str(decision_request)
-        )
-
+        if phase == "COMPUTER":
+            decision_prompt = (
+                "你是浏览器操作决策器。\\n"
+                "根据任务和最近一次真实工具结果，选择下一步动作。\\n"
+                "只能输出 JSON，不要解释。\\n"
+                '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
+                "允许动作：MOUSE_MOVE、MOUSE_CLICK、KEYBOARD_TYPE、"
+                "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE、DONE。\\n"
+                "任务："
+                + str(self.state.get("question", ""))
+                + "\\n最近结果："
+                + str(self.state.get("previous_step_result", ""))
+            )
+        else:
+            decision_prompt = (
+                "你是 V6.6 GPT Decision Layer。\\n"
+                "负责决定当前步骤以及整个任务的下一步。\\n"
+                "不要调用工具。\\n"
+                "不要输出代码。\\n"
+                "不要输出解释性正文。\\n"
+                "当前阶段: " + phase + "\\n"
+                "当前阶段允许的下一步 ACTION: "
+                + phase_next_action + "\\n"
+                "开发阶段 ACTION 必须遵守当前阶段流程；"
+                "但 COMPUTER ACTION（MOUSE_MOVE、MOUSE_CLICK、"
+                "KEYBOARD_TYPE、KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE）"
+                "可在任何阶段按任务需要直接选择。\\n"
+                "严格输出五行：\\n"
+                "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\n"
+                "ACTION: <一个允许的 ACTION>\\n"
+                "ARGS: <当前 ACTION 所需参数；无需参数时留空>\\n"
+                "REASON: <简短原因>\\n"
+                "NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>\\n\\n"
+                + str(decision_request)
+            )
+    
         response = self.ask_llm(
             decision_prompt,
             llm=self.decision_llm
@@ -903,6 +993,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "next_step_requirement": action_data.get(
                 "next_step_requirement",
                 ""
+            ),
+            "actions": action_data.get(
+                "actions",
+                []
             ),
             "allowed": validation.get(
                 "allowed",
@@ -1042,6 +1136,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "KEYBOARD_PRESS",
                 "WINDOW_LIST",
                 "WINDOW_ACTIVATE",
+                "BROWSER_STATE",
             },
             "SUMMARY": {"DONE", "FINISH"},
         }
@@ -1055,6 +1150,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "MOUSE_MOVE",
             "MOUSE_CLICK",
             "KEYBOARD_TYPE",
+            "BROWSER_STATE",
             "KEYBOARD_PRESS",
             "WINDOW_LIST",
             "WINDOW_ACTIVATE",
@@ -1717,7 +1813,8 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "keyboard_type",
                 "keyboard_press",
                 "window_list",
-                "window_activate"
+                "window_activate",
+                "browser_state"
             ],
 
             "SUMMARY": []
@@ -1728,6 +1825,26 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             phase,
             []
         )
+
+    def build_computer_prompt(
+        self,
+        question,
+        observation
+    ):
+        """V6.12 COMPUTER 专用轻量 Decision Prompt。"""
+        return (
+            "你是浏览器操作决策器。\\n"
+            "根据用户任务和最近一次真实浏览器结果，决定下一步动作。\\n"
+            "只能输出 JSON，不要解释。\\n"
+            '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
+            "允许动作：MOUSE_MOVE、MOUSE_CLICK、KEYBOARD_TYPE、"
+            "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE、DONE。\\n"
+            "用户任务："
+            + str(question)
+            + "\\n最近真实结果："
+            + str(observation)
+        )
+
 
     def build_prompt(
         self,
@@ -1981,14 +2098,44 @@ SUMMARY
             "调整",
         ]
 
+        browser_keywords = [
+            "浏览器",
+            "Chromium",
+            "Chrome",
+            "网页",
+            "页面",
+            "URL",
+            "网址",
+        ]
+
+        browser_task = any(
+            keyword in question
+            for keyword in browser_keywords
+        )
+
+        change_task = any(
+            keyword in question
+            for keyword in change_keywords
+        ) and not any(
+            phrase in question
+            for phrase in [
+                "不要修改",
+                "无需修改",
+                "不修改",
+                "禁止修改",
+                "不要改",
+            ]
+        )
+
         self.state["task_mode"] = (
             "CHANGE"
-            if any(
-                keyword in question
-                for keyword in change_keywords
-            )
+            if change_task
             else "REVIEW"
         )
+
+        if browser_task:
+            self.state["task_mode"] = "REVIEW"
+            self.state["phase"] = "COMPUTER"
 
         print(
             "V6.1 task mode:",
@@ -2003,6 +2150,69 @@ SUMMARY
 
         observation = ""
 
+        # V6.12: 浏览器纯状态读取快速通道。
+        # 标题/URL 这类确定性读取无需调用 LLM。
+        browser_read_only = (
+            browser_task
+            and any(
+                keyword in str(question)
+                for keyword in [
+                    "读取当前 Chromium 浏览器的真实状态",
+                    "读取当前浏览器的真实状态",
+                    "当前页面标题和 URL",
+                    "当前页面标题和URL",
+                ]
+            )
+            and not any(
+                keyword in str(question)
+                for keyword in [
+                    "点击",
+                    "输入",
+                    "打开",
+                    "访问",
+                    "导航",
+                    "搜索",
+                ]
+            )
+        )
+
+        if browser_read_only:
+            try:
+                from tools.browser_tools import browser_state
+                browser_result = browser_state.invoke({})
+
+                import json as _json
+                browser_data = _json.loads(
+                    str(browser_result)
+                )
+                title = str(
+                    browser_data.get("title", "")
+                ).strip()
+                url = str(
+                    browser_data.get("url", "")
+                ).strip()
+
+                final_result = (
+                    "标题：" + title + "\n"
+                    "URL：" + url
+                )
+
+                print("V6.12 BROWSER FAST PATH:")
+                print(final_result)
+
+                self.state["previous_step_result"] = final_result
+                self.state["verify_result_done"] = True
+                self.state["verify_result_passed"] = True
+                self.state["phase"] = "DONE"
+
+                return browser_result
+
+            except Exception as e:
+                print(
+                    "V6.12 BROWSER FAST PATH ERROR:",
+                    str(e)
+                )
+
         for step in range(
             1,
             self.max_steps + 1
@@ -2015,6 +2225,14 @@ SUMMARY
                 "=========="
             )
 
+            # V6.12: COMPUTER 首次进入时必须先建立 Decision Request。
+            if (
+                self.state.get("phase") == "COMPUTER"
+                and not self.state.get("decision_request", "").strip()
+            ):
+                self.state["decision_request"] = self.build_decision_request(
+                    observation="当前已进入 COMPUTER 阶段。请根据真实浏览器任务决定下一步 ACTION。"
+                )
 
             if (
                 self.state.get("phase") == "SEARCH"
@@ -2045,10 +2263,16 @@ SUMMARY
 
                     continue
 
-            prompt = self.build_prompt(
-                question,
-                observation
-            )
+            if self.state.get("phase") == "COMPUTER":
+                prompt = self.build_computer_prompt(
+                    question,
+                    observation
+                )
+            else:
+                prompt = self.build_prompt(
+                    question,
+                    observation
+                )
 
             # V6.6:
             # 将标准 Decision Request 注入当前 LLM 请求。
@@ -2058,7 +2282,7 @@ SUMMARY
                 ""
             )
 
-            if decision_request:
+            if decision_request and self.state.get("phase") != "COMPUTER":
                 prompt += (
                     "\n\n========== V6.6 GPT DECISION REQUEST ==========\n"
                     + decision_request
@@ -4074,13 +4298,24 @@ path
                 break
 
 
+            # V6.12：COMPUTER 动作队列非空时，跳过 LLM，直接执行下一动作。
+            queued_action = None
+            if self.state.get("computer_action_queue"):
+                queued_action = self.state["computer_action_queue"].pop(0)
+                response = __import__("json").dumps(queued_action, ensure_ascii=False)
+                prompt = ""
+                print("V6.12 COMPUTER Queue →", response)
+
             print(
                 "V6 DEBUG BEFORE LLM:",
                 "phase =", self.state.get("phase"),
                 "prompt_chars =", len(str(prompt))
             )
 
-            if self.state.get("phase") == "ANALYZE":
+            if queued_action is not None:
+                # V6.12：队列动作已经准备好，禁止再次调用 LLM。
+                pass
+            elif self.state.get("phase") == "ANALYZE":
                 response = (
                     "<analyze_code>\n"
                     + str(
@@ -4133,11 +4368,44 @@ path
                 "KEYBOARD_PRESS": "keyboard_press",
                 "WINDOW_LIST": "window_list",
                 "WINDOW_ACTIVATE": "window_activate",
+                "BROWSER_STATE": "browser_state",
             }
 
             decision_action = str(
                 decision.get("action", "")
             ).strip().upper()
+
+            # V6.12：一次 Decision 返回多个 COMPUTER 动作时，
+            # 第一动作立即执行，其余动作进入队列，避免每个动作都重新调用 LLM。
+            decision_actions = decision.get("actions", [])
+            if (
+                decision.get("allowed", False)
+                and decision_action in computer_tools
+                and isinstance(decision_actions, list)
+                and len(decision_actions) > 1
+            ):
+                valid_queue = []
+                for item in decision_actions[1:]:
+                    action_name = str(
+                        item.get("action", "")
+                    ).strip().upper()
+                    if action_name in computer_tools or action_name == "DONE":
+                        valid_queue.append({
+                            "ACTION": action_name,
+                            "ARGS": str(item.get("args", "")).strip(),
+                            "REASON": str(item.get("reason", "")),
+                            "TASK_CONTROL": "DONE" if action_name == "DONE" else "CONTINUE_STEP"
+                        })
+                    else:
+                        break
+
+                self.state["computer_action_queue"] = valid_queue
+
+                print(
+                    "V6.12 COMPUTER Queue:",
+                    len(valid_queue),
+                    "actions"
+                )
 
             if (
                 decision.get("allowed", False)
@@ -4508,6 +4776,7 @@ path
                 "keyboard_press",
                 "window_list",
                 "window_activate",
+                "browser_state"
             }
 
             if tool in computer_tool_names:
@@ -5240,6 +5509,7 @@ Python 审查:
                     self.state["verify_result_done"] = False
                     self.state["verify_result_passed"] = False
                     self.state["summary_done"] = False
+                    print("V6 DEBUG NEXT_STEP_PHASE_BEFORE_RESET:", self.state.get("phase"))
                     self.state["phase"] = "SEARCH"
 
                     print(
