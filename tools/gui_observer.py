@@ -89,3 +89,23 @@ def find_window(query):
             return window
 
     return None
+
+
+def get_active_window():
+    """Return metadata for the currently active X11 window."""
+    result = subprocess.run(
+        ["xprop", "-root", "_NET_ACTIVE_WINDOW"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    m = re.search(r"#\s*(0x[0-9a-fA-F]+)", result.stdout)
+    if not m:
+        return None
+
+    window_id = int(m.group(1), 16)
+    return next(
+        (window for window in list_windows()
+         if int(window["window_id"], 16) == window_id),
+        None,
+    )
