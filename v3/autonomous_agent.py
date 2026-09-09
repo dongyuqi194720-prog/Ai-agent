@@ -7,6 +7,87 @@ import re
 from ai_agent.codex_bridge import CodexBridge
 
 
+def extract_target_app(question):
+    """从桌面任务中提取目标应用名。"""
+    text = str(question)
+
+    known_apps = [
+        "钉钉",
+        "微信",
+        "Chromium",
+        "Chrome",
+        "Firefox",
+    ]
+
+    for app in known_apps:
+        if app in text:
+            return app
+
+    return None
+
+
+def launch_target_app(app_name):
+    """通过 .desktop 主入口启动目标桌面应用，并确认窗口出现。"""
+    import glob
+    import shlex
+    import subprocess
+    import time
+
+    desktop_files = glob.glob("/usr/share/applications/*.desktop") + glob.glob(
+        os.path.expanduser("~/.local/share/applications/*.desktop")
+    )
+
+    for desktop_file in desktop_files:
+        try:
+            content = open(
+                desktop_file, encoding="utf-8", errors="ignore"
+            ).read()
+        except OSError:
+            continue
+
+        section = None
+        name = None
+        exec_line = None
+
+        for line in content.splitlines():
+            line = line.strip()
+
+            if line.startswith("["):
+                section = line
+                continue
+
+            if section != "[Desktop Entry]":
+                continue
+
+            if line.startswith("Name="):
+                name = line[5:].strip()
+            elif line.startswith("Exec="):
+                exec_line = line[5:].strip()
+
+        if (
+            not name
+            or app_name.lower() not in name.lower()
+            or not exec_line
+        ):
+            continue
+
+        command = [
+            arg for arg in shlex.split(exec_line)
+            if arg not in ("%u", "%U", "%f", "%F", "%i", "%c", "%k")
+        ]
+
+        if not command:
+            return False
+
+        subprocess.Popen(command)
+        time.sleep(2)
+
+        from tools.gui_observer import find_window
+        return find_window(app_name) is not None
+
+    return False
+
+
 class AutonomousAgent:
 
 
@@ -2242,11 +2323,12 @@ SUMMARY
                     str(e)
                 )
 
-        # V6.16: 简单桌面应用观察快速通道
+        # V6.17.1: 通用桌面应用观察快速通道
+        target_app = extract_target_app(question)
         simple_gui_observe = (
             computer_task
+            and target_app
             and "观察" in str(question)
-            and "钉钉" in str(question)
             and any(
                 phrase in str(question)
                 for phrase in ["不要点击", "不点击", "无需点击", "不要输入", "不要修改", "不修改"]
@@ -2255,25 +2337,32 @@ SUMMARY
         if simple_gui_observe:
             try:
                 from tools.gui_observer import observe_window
-                observed = observe_window("钉钉")
+                observed = observe_window(target_app)
+
+                # V6.17.2：目标应用不存在时自动启动，再重新观察。
+                if not observed:
+                    print("V6.17.2 GUI: 未找到", target_app, "，尝试自动启动")
+                    if launch_target_app(target_app):
+                        observed = observe_window(target_app)
+
                 if observed:
                     final_result = (
-                        "已观察到钉钉窗口："
+                        "已观察到" + target_app + "窗口："
                         + observed["title"]
                         + " "
                         + str(observed["width"])
                         + "x"
                         + str(observed["height"])
                     )
-                    print("V6.16 GUI FAST PATH:", final_result)
+                    print("V6.17.2 GUI FAST PATH:", final_result)
                     self.state["previous_step_result"] = final_result
                     self.state["verify_result_done"] = True
                     self.state["verify_result_passed"] = True
                     self.state["phase"] = "DONE"
-                    print("V6.16 GUI FAST PATH: DONE")
+                    print("V6.17.2 GUI FAST PATH: DONE")
                     return final_result
             except Exception as e:
-                print("V6.16 GUI FAST PATH ERROR:", str(e))
+                print("V6.17.2 GUI FAST PATH ERROR:", str(e))
 
         # V6.14: 简单浏览器动作快速通道
         simple_browser_click = re.search(r'(?:如果|若).*?(?:页面|网页).*?(?:看到|出现)[“"”]([^“"”]+)[“"”].*?(?:点击|单击)[“"”]([^“"”]+)[“"”]', str(question))
