@@ -266,6 +266,8 @@ class AutonomousAgent:
             "last_action": "",
             "computer_action_queue": [],
             "computer_observe_done": False,
+            "llm_decision_count": 0,
+            "max_llm_decisions": 3,
         }
          
 
@@ -1024,6 +1026,29 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 + str(decision_request)
             )
     
+        max_decisions = int(self.state.get("max_llm_decisions", 3))
+        count = int(self.state.get("llm_decision_count", 0))
+        if count >= max_decisions:
+            print(
+                "V6.21 LLM Decision Budget exhausted:",
+                f"{count}/{max_decisions}"
+            )
+            return (
+                '{"TASK_CONTROL":"DONE",'
+                '"ACTION":"DONE",'
+                '"ARGS":"",'
+                '"REASON":"LLM Decision Budget exhausted",'
+                '"NEXT_STEP_REQUIREMENT":""}'
+            )
+
+        self.state["llm_decision_count"] = count + 1
+        print(
+            "V6.21 LLM Decision:",
+            self.state["llm_decision_count"],
+            "/",
+            max_decisions
+        )
+
         response = self.ask_llm(
             decision_prompt,
             llm=self.decision_llm
