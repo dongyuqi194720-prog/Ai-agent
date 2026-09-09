@@ -81,10 +81,16 @@ def find_window(query):
     if not query:
         return None
 
+    core_name = query.split()[0]
+    if core_name in {"web", "browser", "application"}:
+        core_name = query
+
     for window in list_windows():
         if (
             query in window["title"].lower()
             or query in window["wm_class"].lower()
+            or core_name in window["title"].lower()
+            or core_name in window["wm_class"].lower()
         ):
             return window
 

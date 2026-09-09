@@ -2380,6 +2380,10 @@ SUMMARY
             try:
                 from tools.gui_observer import observe_window
                 observed = observe_window(target_app)
+                if observed:
+                    from tools.computer_tools import window_activate
+                    window_activate(observed["window_id"])
+                    observed = observe_window(target_app)
 
                 # V6.17.2：目标应用不存在时自动启动，再重新观察。
                 if not observed:
