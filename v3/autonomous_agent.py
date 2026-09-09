@@ -1054,9 +1054,8 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             llm=self.decision_llm
         )
 
-        # V6 协议自修复：
-        # GPT 选择 NEXT_STEP 但遗漏下一步骤要求时，
-        # 自动再次请求 GPT 补全协议，不需要人工介入。
+        # V6.22：NEXT_STEP 缺少 NEXT_STEP_REQUIREMENT 时，
+        # 使用已有 REASON 做确定性补全，禁止再次调用 LLM。
         parsed = self.parse_action(response)
 
         if (
@@ -1065,24 +1064,22 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 parsed.get("next_step_requirement", "")
             ).strip()
         ):
-            repair_prompt = (
-                "你刚才选择了 NEXT_STEP，但遗漏了 "
-                "NEXT_STEP_REQUIREMENT。\\n"
-                "请重新输出完整的四行 Decision Protocol。\\n"
-                "必须明确写出下一步骤要完成的具体要求。\\n"
-                "不要解释，不要输出其他内容。\\n"
-                "TASK_CONTROL: NEXT_STEP\\n"
-                "ACTION: <一个允许的 ACTION>\\n"
-                "REASON: <简短原因>\\n"
-                "NEXT_STEP_REQUIREMENT: <明确的下一步骤要求>\\n\\n"
-                "原始决策如下：\\n"
-                + str(response)
-            )
+            reason = str(
+                parsed.get("reason", "")
+            ).strip()
 
-            response = self.ask_llm(
-                repair_prompt,
-                llm=self.decision_llm
-            )
+            if reason:
+                parsed["next_step_requirement"] = reason
+                response = __import__("json").dumps(
+                    {
+                        "TASK_CONTROL": "NEXT_STEP",
+                        "ACTION": parsed.get("action", ""),
+                        "ARGS": parsed.get("args", ""),
+                        "REASON": reason,
+                        "NEXT_STEP_REQUIREMENT": reason
+                    },
+                    ensure_ascii=False
+                )
 
         print(
             "V6.10 RAW DECISION RESPONSE:",
