@@ -109,3 +109,22 @@ def get_active_window():
          if int(window["window_id"], 16) == window_id),
         None,
     )
+
+def capture_window(window_id, output_path):
+    """Capture an X11 window to an image file."""
+    subprocess.run(
+        ["import", "-window", str(window_id), str(output_path)],
+        check=True,
+    )
+    return str(output_path)
+
+def observe_window(query, output_path="/tmp/v6_window.png"):
+    """Find a window and capture its current visual state."""
+    window = find_window(query)
+    if not window:
+        return None
+
+    capture_window(window["window_id"], output_path)
+    result = dict(window)
+    result["screenshot"] = output_path
+    return result

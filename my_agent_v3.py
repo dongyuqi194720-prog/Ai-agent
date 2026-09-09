@@ -221,6 +221,11 @@ while True:
         question
     )
 
+    # V6.16：Agent 已完成任务时，CLI 直接结束本轮交互。
+    if agent.state.get("phase") == "DONE":
+        print("V6.16 CLI: TASK DONE")
+        break
+
     # V6.8：普通 Codex 聊天人工接力。
     if isinstance(result, dict) and result.get("waiting_codex"):
         print()

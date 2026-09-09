@@ -1,6 +1,8 @@
 from langchain_core.tools import tool
 import os
 import subprocess
+from tools.gui_observer import observe_window
+from tools.ocr_observer import observe_text
 
 
 @tool
@@ -165,3 +167,24 @@ def window_activate(window_id: str):
         return f"窗口已激活: {window_id}"
     except Exception as e:
         return f"窗口激活失败: {e}"
+
+
+@tool
+def observe_window_tool(query: str):
+    """观察指定桌面窗口，返回窗口信息、截图路径和 OCR 文本。"""
+    try:
+        window = observe_window(query)
+        if not window:
+            return f"未找到窗口: {query}"
+
+        text = observe_text(window["screenshot"])
+        return (
+            f"窗口: {window['title']}\n"
+            f"window_id: {window['window_id']}\n"
+            f"位置: ({window['x']}, {window['y']})\n"
+            f"大小: {window['width']}x{window['height']}\n"
+            f"截图: {window['screenshot']}\n"
+            f"OCR文本:\n{text}"
+        )
+    except Exception as e:
+        return f"窗口观察失败: {e}"

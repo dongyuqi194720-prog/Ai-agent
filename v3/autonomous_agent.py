@@ -871,7 +871,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
                 "一次尽可能规划完整动作序列；网页元素优先使用 BROWSER_STATE、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT，不要用 MOUSE_CLICK 代替。\n"
                 "允许动作：MOUSE_MOVE、MOUSE_CLICK、KEYBOARD_TYPE、"
-                "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE、BROWSER_TEXT、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT、DONE。\\n"
+                "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、OBSERVE_WINDOW、BROWSER_STATE、BROWSER_TEXT、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT、DONE。\\n"
                 "任务："
                 + str(self.state.get("question", ""))
                 + "\\n最近结果："
@@ -2124,6 +2124,24 @@ SUMMARY
             for keyword in browser_keywords
         )
 
+        computer_keywords = [
+            "钉钉",
+            "微信",
+            "桌面",
+            "窗口",
+            "应用",
+            "点击",
+            "激活",
+            "打开",
+            "按键",
+            "观察",
+        ]
+
+        computer_task = any(
+            keyword in question
+            for keyword in computer_keywords
+        )
+
         change_task = any(
             keyword in question
             for keyword in change_keywords
@@ -2144,7 +2162,7 @@ SUMMARY
             else "REVIEW"
         )
 
-        if browser_task:
+        if computer_task:
             self.state["task_mode"] = "REVIEW"
             self.state["phase"] = "COMPUTER"
 
@@ -2223,6 +2241,39 @@ SUMMARY
                     "V6.12 BROWSER FAST PATH ERROR:",
                     str(e)
                 )
+
+        # V6.16: 简单桌面应用观察快速通道
+        simple_gui_observe = (
+            computer_task
+            and "观察" in str(question)
+            and "钉钉" in str(question)
+            and any(
+                phrase in str(question)
+                for phrase in ["不要点击", "不点击", "无需点击", "不要输入", "不要修改", "不修改"]
+            )
+        )
+        if simple_gui_observe:
+            try:
+                from tools.gui_observer import observe_window
+                observed = observe_window("钉钉")
+                if observed:
+                    final_result = (
+                        "已观察到钉钉窗口："
+                        + observed["title"]
+                        + " "
+                        + str(observed["width"])
+                        + "x"
+                        + str(observed["height"])
+                    )
+                    print("V6.16 GUI FAST PATH:", final_result)
+                    self.state["previous_step_result"] = final_result
+                    self.state["verify_result_done"] = True
+                    self.state["verify_result_passed"] = True
+                    self.state["phase"] = "DONE"
+                    print("V6.16 GUI FAST PATH: DONE")
+                    return final_result
+            except Exception as e:
+                print("V6.16 GUI FAST PATH ERROR:", str(e))
 
         # V6.14: 简单浏览器动作快速通道
         simple_browser_click = re.search(r'(?:如果|若).*?(?:页面|网页).*?(?:看到|出现)[“"”]([^“"”]+)[“"”].*?(?:点击|单击)[“"”]([^“"”]+)[“"”]', str(question))
@@ -4404,6 +4455,7 @@ path
                 "KEYBOARD_PRESS": "keyboard_press",
                 "WINDOW_LIST": "window_list",
                 "WINDOW_ACTIVATE": "window_activate",
+                "OBSERVE_WINDOW": "observe_window_tool",
                 "BROWSER_STATE": "browser_state",
                 "BROWSER_TEXT": "browser_text_tool",
                 "BROWSER_ELEMENTS": "browser_elements_tool",
