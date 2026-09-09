@@ -35,6 +35,18 @@ class Controller:
 
             return args
 
+        # V6.20：Decision Protocol 的 dict 参数可能以字符串形式进入。
+        # 这是确定性格式转换，不调用 LLM。
+        stripped = args.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            import ast
+            try:
+                parsed = ast.literal_eval(stripped)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, SyntaxError):
+                pass
+
 
 
         if name == "read_file":

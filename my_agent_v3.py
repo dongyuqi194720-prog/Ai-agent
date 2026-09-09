@@ -1,3 +1,4 @@
+import sys
 import os
 
 # V6：统一代理协议，httpx 不接受 socks://，统一转换为 socks5://。
@@ -64,6 +65,7 @@ try:
         model=MODEL,
         base_url=BASE_URL,
         api_key="none",
+        max_tokens=32,
         temperature=0.2
     )
 finally:
@@ -171,37 +173,43 @@ agent = AutonomousAgent(
 
 
 
+if len(sys.argv) > 1:
+    question = " ".join(sys.argv[1:]).strip()
+    _cli_single_task = True
+else:
+    _cli_single_task = False
+
 while True:
 
+    if _cli_single_task:
+        _cli_single_task = False
+    else:
+        try:
 
-    try:
+            print("\n你: ", end="", flush=True)
+            input_lines = []
 
-        print("\n你: ", end="", flush=True)
-        input_lines = []
+            while True:
+                line = input()
 
-        while True:
-            line = input()
+                if line.strip() == "END":
+                    break
 
-            if line.strip() == "END":
-                break
+                input_lines.append(line)
 
-            input_lines.append(line)
+            question = "\n".join(
+                input_lines
+            ).strip()
 
-        question = "\n".join(
-            input_lines
-        ).strip()
+        except KeyboardInterrupt:
 
+            print()
 
-    except KeyboardInterrupt:
+            break
 
-        print()
+        except EOFError:
 
-        break
-
-
-    except EOFError:
-
-        break
+            break
 
 
 

@@ -265,6 +265,7 @@ class AutonomousAgent:
             "decision_request": "",
             "last_action": "",
             "computer_action_queue": [],
+            "computer_observe_done": False,
         }
          
 
@@ -924,6 +925,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                     "MOUSE_CLICK",
                     "KEYBOARD_TYPE",
                     "KEYBOARD_PRESS",
+        "WINDOW_ACTIVATE",
                     "WINDOW_LIST",
                     "WINDOW_ACTIVATE",
                     "BROWSER_STATE",
@@ -988,17 +990,16 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
 
         if phase == "COMPUTER":
             decision_prompt = (
-                "你是浏览器操作决策器。\\n"
-                "根据任务和最近一次真实工具结果，选择下一步动作。\\n"
+                "你是桌面操作决策器。\\n"
+                "根据任务和最近一次真实工具结果，决定下一步。\\n"
                 "只能输出 JSON，不要解释。\\n"
                 '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
-                "一次尽可能规划完整动作序列；网页元素优先使用 BROWSER_STATE、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT，不要用 MOUSE_CLICK 代替。\n"
-                "允许动作：MOUSE_MOVE、MOUSE_CLICK、KEYBOARD_TYPE、"
-                "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、OBSERVE_WINDOW、BROWSER_STATE、BROWSER_TEXT、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT、DONE。\\n"
+                "允许动作：OBSERVE_WINDOW、WINDOW_LIST、WINDOW_ACTIVATE、"
+                "BROWSER_STATE、BROWSER_TEXT、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT、DONE。\\n"
                 "任务："
                 + str(self.state.get("question", ""))
-                + "\\n最近结果："
-                + str(decision_request)
+                + "\\n最近真实结果："
+                + str(self.state.get("previous_step_result", ""))
             )
         else:
             decision_prompt = (
@@ -1218,8 +1219,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "MOUSE_CLICK",
             "KEYBOARD_TYPE",
             "KEYBOARD_PRESS",
+        "WINDOW_ACTIVATE",
             "WINDOW_LIST",
             "WINDOW_ACTIVATE",
+        "OBSERVE_WINDOW",
             "BROWSER_STATE",
             "BROWSER_TEXT",
             "BROWSER_ELEMENTS",
@@ -1238,6 +1241,29 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
         phase = str(
             self.state.get("phase", "")
         ).strip().upper()
+
+        # V6.20: 原始任务明确禁止点击、输入或修改时，
+        # Python 安全层直接拒绝对应动作，不依赖 LLM 自律。
+        original_task = str(
+            self.state.get("question", "")
+        )
+        forbidden_action_words = (
+            "禁止点击" in original_task
+            or "禁止输入" in original_task
+            or "禁止修改" in original_task
+        )
+        if forbidden_action_words and action in {
+            "MOUSE_CLICK",
+            "KEYBOARD_TYPE",
+            "KEYBOARD_PRESS",
+        "WINDOW_ACTIVATE",
+            "MODIFY",
+        }:
+            return {
+                "allowed": False,
+                "action": action,
+                "reason": "原始任务明确禁止点击、输入或修改，Python 安全层拒绝该动作"
+            }
 
         # V6.11: GPT 已明确确认整个原始任务完成时，
         # DONE 属于全局终态，不受当前 phase ACTION 白名单限制。
@@ -1265,8 +1291,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "MOUSE_CLICK",
                 "KEYBOARD_TYPE",
                 "KEYBOARD_PRESS",
+        "WINDOW_ACTIVATE",
                 "WINDOW_LIST",
                 "WINDOW_ACTIVATE",
+        "OBSERVE_WINDOW",
                 "BROWSER_STATE",
             },
             "SUMMARY": {"DONE", "FINISH"},
@@ -1283,8 +1311,10 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
             "KEYBOARD_TYPE",
             "BROWSER_STATE",
             "KEYBOARD_PRESS",
+        "WINDOW_ACTIVATE",
             "WINDOW_LIST",
             "WINDOW_ACTIVATE",
+        "OBSERVE_WINDOW",
         }
 
         if (
@@ -1945,6 +1975,7 @@ REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，
                 "keyboard_press",
                 "window_list",
                 "window_activate",
+                "observe_window_tool",
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
@@ -2370,7 +2401,7 @@ SUMMARY
         simple_gui_observe = (
             computer_task
             and target_app
-            and "观察" in str(question)
+            and ("观察" in str(question) or "第一步必须" in str(question))
             and any(
                 phrase in str(question)
                 for phrase in ["不要点击", "不点击", "无需点击", "不要输入", "不要修改", "不修改"]
@@ -2486,7 +2517,7 @@ SUMMARY
             if self.state.get("phase") == "COMPUTER":
                 prompt = self.build_computer_prompt(
                     question,
-                    observation
+                    self.state.get("previous_step_result", observation)
                 )
             else:
                 prompt = self.build_prompt(
@@ -4519,9 +4550,27 @@ path
                 break
 
 
-            # V6.12：COMPUTER 动作队列非空时，跳过 LLM，直接执行下一动作。
+            # V6.20：确定性 GUI 观察先于 LLM。
             queued_action = None
-            if self.state.get("computer_action_queue"):
+            if (
+                self.state.get("phase") == "COMPUTER"
+                and not self.state.get("computer_observe_done")
+                and target_app
+                and "第一步必须" in str(question)
+            ):
+                response = __import__("json").dumps({
+                    "TASK_CONTROL": "NEXT_STEP",
+                    "ACTION": "OBSERVE_WINDOW",
+                    "ARGS": {"query": target_app},
+                    "REASON": "确定性执行任务要求的第一步桌面观察，不调用 LLM",
+                    "NEXT_STEP_REQUIREMENT": "根据真实观察结果决定下一步"
+                }, ensure_ascii=False)
+                self.state["computer_observe_done"] = True
+                queued_action = response
+                print("V6.20 DETERMINISTIC OBSERVE →", target_app)
+
+            # V6.12：COMPUTER 动作队列非空时，跳过 LLM，直接执行下一动作。
+            if queued_action is None and self.state.get("computer_action_queue"):
                 queued_action = self.state["computer_action_queue"].pop(0)
                 response = __import__("json").dumps(queued_action, ensure_ascii=False)
                 prompt = ""
@@ -4534,7 +4583,7 @@ path
             )
 
             if queued_action is not None:
-                # V6.12：队列动作已经准备好，禁止再次调用 LLM。
+                # 确定性动作已经生成，禁止再次调用 LLM。
                 pass
             elif self.state.get("phase") == "ANALYZE":
                 response = (
@@ -4552,11 +4601,7 @@ path
                     "V6.9 ANALYZE: direct analyze_code, skip LLM"
                 )
             else:
-                response = self.ask_llm(
-                    self.state.get("decision_request", prompt)
-                    if self.state.get("phase") == "COMPUTER"
-                    else prompt
-                )
+                response = self.ask_llm(prompt)
 
             print(response)
 
@@ -4567,6 +4612,31 @@ path
             decision = self.decision_step(
                 response
             )
+
+            if not decision.get("allowed", False):
+                reason = (
+                    decision.get("validation_reason", "")
+                    or decision.get("reason", "")
+                )
+                print("V6.20 safety rejected:", reason)
+
+                # V6.20：明确的观察-only任务在观察完成后，
+                # 若下一动作违反原始任务禁止条件，则任务已经达到
+                # “观察并根据结果完成”的安全边界，直接结束。
+                original_task = str(self.state.get("question", ""))
+                observation_only = (
+                    self.state.get("computer_observe_done")
+                    and any(
+                        x in original_task
+                        for x in ("禁止点击", "禁止输入", "禁止修改")
+                    )
+                )
+
+                if observation_only:
+                    print("V6.20 observation-only task complete")
+                    break
+
+                continue
 
             self.state["last_action"] = decision.get(
                 "action",
@@ -4994,9 +5064,8 @@ path
                 "chars"
             )
 
-            print("DEBUG tool returned:", type(result))
-            print("DEBUG result length:", len(str(result)))
 
+            # V6.20：确定性 GUI 观察完成后直接闭环。
             # V6.11 COMPUTER：真实桌面工具执行完成后，
             # 将真实结果立即交回 GPT Decision Layer。
             computer_tool_names = {
@@ -5006,6 +5075,7 @@ path
                 "keyboard_press",
                 "window_list",
                 "window_activate",
+                "observe_window_tool",
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
