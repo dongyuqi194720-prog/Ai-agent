@@ -8,22 +8,49 @@ from ai_agent.codex_bridge import CodexBridge
 
 
 def extract_target_app(question):
-    """从桌面任务中提取目标应用名。"""
+    """从系统 .desktop 文件动态识别桌面目标应用。"""
+    import glob
+    import os
+    from pathlib import Path
+
     text = str(question)
+    candidates = []
 
-    known_apps = [
-        "钉钉",
-        "微信",
-        "Chromium",
-        "Chrome",
-        "Firefox",
-    ]
+    desktop_files = glob.glob("/usr/share/applications/*.desktop") + glob.glob(
+        os.path.expanduser("~/.local/share/applications/*.desktop")
+    )
 
-    for app in known_apps:
-        if app in text:
-            return app
+    for desktop_file in desktop_files:
+        try:
+            content = Path(desktop_file).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
 
-    return None
+        section = None
+        names = []
+
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith("["):
+                section = line
+                continue
+            if section != "[Desktop Entry]":
+                continue
+
+            if line.startswith("Name="):
+                names.append(line[5:].strip())
+            elif line.startswith("Name[zh_CN]="):
+                names.append(line[12:].strip())
+
+        for name in names:
+            if name and (name.lower() in text.lower() or any(part.lower() in text.lower() for part in name.split() if len(part) >= 5 and part.lower() not in {"browser", "application"})):
+                candidates.append((len(name), name))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def launch_target_app(app_name):
@@ -80,10 +107,25 @@ def launch_target_app(app_name):
             return False
 
         subprocess.Popen(command)
-        time.sleep(2)
+        from tools.gui_observer import list_windows
 
-        from tools.gui_observer import find_window
-        return find_window(app_name) is not None
+        executable = os.path.basename(command[0]).lower()
+
+        for _ in range(20):
+            for window in list_windows():
+                title = window["title"].lower()
+                wm_class = window["wm_class"].lower()
+
+                if (
+                    executable in wm_class
+                    or executable in title
+                    or app_name.lower() in title
+                ):
+                    return window
+
+            time.sleep(0.1)
+
+        return False
 
     return False
 
@@ -2342,8 +2384,9 @@ SUMMARY
                 # V6.17.2：目标应用不存在时自动启动，再重新观察。
                 if not observed:
                     print("V6.17.2 GUI: 未找到", target_app, "，尝试自动启动")
-                    if launch_target_app(target_app):
-                        observed = observe_window(target_app)
+                    observed = launch_target_app(target_app)
+                    if observed:
+                        print("V6.18 GUI: 已启动并找到窗口")
 
                 if observed:
                     final_result = (
